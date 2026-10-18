@@ -510,13 +510,13 @@ func (s *Store) SetFlags(user string, message Message, flags map[byte]bool) (Mes
 }
 
 func cloneFlags(flags map[byte]bool) map[byte]bool {
-	copy := make(map[byte]bool, len(flags))
+	theCopy := make(map[byte]bool, len(flags))
 	for flag, set := range flags {
 		if set {
-			copy[flag] = true
+			theCopy[flag] = true
 		}
 	}
-	return copy
+	return theCopy
 }
 
 func (s *Store) Delete(message Message) error {

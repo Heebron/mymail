@@ -973,19 +973,19 @@ func parseFetchBodySections(requested string, data []byte) []fetchBodySection {
 			if peek {
 				open += len(".PEEK")
 			}
-			close := strings.IndexByte(upper[open:], ']')
-			if close < 0 {
+			closeIdx := strings.IndexByte(upper[open:], ']')
+			if closeIdx < 0 {
 				break
 			}
-			close += open
-			section := requested[open+1 : close]
+			closeIdx += open
+			section := requested[open+1 : closeIdx]
 			sections = append(sections, fetchBodySection{
-				label:    "BODY[" + upper[open+1:close] + "]",
+				label:    "BODY[" + upper[open+1:closeIdx] + "]",
 				data:     bodySectionData(section, data),
 				peek:     peek,
 				markSeen: !peek && bodySectionMarksSeen(section),
 			})
-			index = close + 1
+			index = closeIdx + 1
 			continue
 		}
 		if strings.HasPrefix(upper[index:], "RFC822") {
@@ -1043,10 +1043,10 @@ func bodySectionData(section string, data []byte) []byte {
 	upper := strings.ToUpper(strings.TrimSpace(section))
 	if strings.HasPrefix(upper, "HEADER.FIELDS") {
 		open := strings.IndexByte(section, '(')
-		close := strings.LastIndexByte(section, ')')
-		if open >= 0 && close > open {
+		closeIdx := strings.LastIndexByte(section, ')')
+		if open >= 0 && closeIdx > open {
 			fields := make(map[string]bool)
-			for _, field := range strings.Fields(section[open+1 : close]) {
+			for _, field := range strings.Fields(section[open+1 : closeIdx]) {
 				fields[strings.ToUpper(field)] = true
 			}
 			return selectedHeaderFields(headerWithEnding, lineEnding, fields, strings.HasPrefix(upper, "HEADER.FIELDS.NOT"))
@@ -1415,16 +1415,16 @@ func sameMessageFlags(left, right map[byte]bool) bool {
 }
 
 func addFlag(flags map[byte]bool, flag byte, value bool) map[byte]bool {
-	copy := make(map[byte]bool, len(flags)+1)
+	theCopy := make(map[byte]bool, len(flags)+1)
 	for key, set := range flags {
-		copy[key] = set
+		theCopy[key] = set
 	}
 	if value {
-		copy[flag] = true
+		theCopy[flag] = true
 	} else {
-		delete(copy, flag)
+		delete(theCopy, flag)
 	}
-	return copy
+	return theCopy
 }
 
 func formatFlags(flags map[byte]bool) string {

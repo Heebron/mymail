@@ -73,9 +73,12 @@ go build -o mymail-send ./cmd/mymail-send
 
 Use `-server host:port` for another endpoint, `-tls` for an implicit TLS
 listener, and `-insecure-skip-verify` only when testing with a certificate that
-cannot be verified. The client also accepts `-subject` and `-body`; SMTP
-authentication is required when relaying to an external domain, while local
-deliveries can still be accepted without authentication.
+cannot be verified. The client also accepts `-subject` and `-body`, plus
+repeatable or comma-separated `-to`, `-cc`, and `-bcc` options. CC addresses
+are included in the message headers; BCC addresses are submitted to SMTP but
+are omitted from the message. SMTP authentication is required when relaying to
+an external domain, while local deliveries can still be accepted without
+authentication.
 
 Recipients whose domain is not configured as local are relayed directly to the
 domain's MX host on port 25 only for authenticated SMTP sessions. MyMail tries MX

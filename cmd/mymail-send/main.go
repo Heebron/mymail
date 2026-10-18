@@ -19,7 +19,10 @@ const defaultSubject = "MyMail test message"
 func main() {
 	server := flag.String("server", "127.0.0.1:2525", "SMTP server address")
 	from := flag.String("from", "", "sender address (required)")
-	to := flag.String("to", "", "recipient address (required)")
+	var to, cc, bcc addressListFlag
+	flag.Var(&to, "to", "recipient address (required; repeatable or comma-separated)")
+	flag.Var(&cc, "cc", "carbon-copy recipient (repeatable or comma-separated)")
+	flag.Var(&bcc, "bcc", "blind carbon-copy recipient (repeatable or comma-separated)")
 	subject := flag.String("subject", defaultSubject, "message subject")
 	body := flag.String("body", "This is a test message from mymail-send.", "plain-text message body")
 	username := flag.String("username", "", "optional SMTP username")
@@ -28,7 +31,7 @@ func main() {
 	insecure := flag.Bool("insecure-skip-verify", false, "skip TLS certificate verification")
 	flag.Parse()
 
-	if *from == "" || *to == "" {
+	if *from == "" || len(to) == 0 {
 		flag.Usage()
 		fmt.Fprintln(os.Stderr, "-from and -to are required")
 		os.Exit(2)
@@ -38,23 +41,31 @@ func main() {
 		os.Exit(2)
 	}
 
-	if err := sendMessage(*server, *from, *to, *subject, *body, *username, *password, *implicitTLS, *insecure); err != nil {
+	if err := sendMessage(*server, *from, to, cc, bcc, *subject, *body, *username, *password, *implicitTLS, *insecure); err != nil {
 		fmt.Fprintf(os.Stderr, "send message: %v\n", err)
 		os.Exit(1)
 	}
 	fmt.Println("message sent")
 }
 
-func sendMessage(server, from, to, subject, body, username, password string, implicitTLS, insecure bool) error {
+func sendMessage(server, from string, to, cc, bcc []string, subject, body, username, password string, implicitTLS, insecure bool) error {
 	fromAddress, err := parseAddress(from, "from")
 	if err != nil {
 		return err
 	}
-	toAddress, err := parseAddress(to, "to")
+	toAddresses, err := parseAddresses(to, "to")
 	if err != nil {
 		return err
 	}
-	message, err := buildMessage(fromAddress, toAddress, subject, body)
+	ccAddresses, err := parseAddresses(cc, "cc")
+	if err != nil {
+		return err
+	}
+	bccAddresses, err := parseAddresses(bcc, "bcc")
+	if err != nil {
+		return err
+	}
+	message, err := buildMessageWithRecipients(fromAddress, toAddresses, ccAddresses, subject, body)
 	if err != nil {
 		return err
 	}
@@ -92,8 +103,14 @@ func sendMessage(server, from, to, subject, body, username, password string, imp
 	if err := client.Mail(fromAddress.Address); err != nil {
 		return fmt.Errorf("set sender: %w", err)
 	}
-	if err := client.Rcpt(toAddress.Address); err != nil {
-		return fmt.Errorf("set recipient: %w", err)
+	recipients := make([]*mail.Address, 0, len(toAddresses)+len(ccAddresses)+len(bccAddresses))
+	recipients = append(recipients, toAddresses...)
+	recipients = append(recipients, ccAddresses...)
+	recipients = append(recipients, bccAddresses...)
+	for _, address := range recipients {
+		if err := client.Rcpt(address.Address); err != nil {
+			return fmt.Errorf("set recipient %s: %w", address.Address, err)
+		}
 	}
 	writer, err := client.Data()
 	if err != nil {
@@ -120,15 +137,71 @@ func parseAddress(value, label string) (*mail.Address, error) {
 	return address, nil
 }
 
+func parseAddresses(values []string, label string) ([]*mail.Address, error) {
+	addresses := make([]*mail.Address, 0, len(values))
+	for _, value := range values {
+		parsed, err := mail.ParseAddressList(strings.TrimSpace(value))
+		if err != nil || len(parsed) == 0 {
+			if err == nil {
+				err = errors.New("empty or invalid address")
+			}
+			return nil, fmt.Errorf("invalid %s address: %w", label, err)
+		}
+		for _, address := range parsed {
+			if address.Address == "" || strings.ContainsAny(address.Address, "\r\n") {
+				return nil, fmt.Errorf("invalid %s address: empty or invalid address", label)
+			}
+		}
+		addresses = append(addresses, parsed...)
+	}
+	return addresses, nil
+}
+
+type addressListFlag []string
+
+func (f *addressListFlag) String() string {
+	return strings.Join(*f, ",")
+}
+
+func (f *addressListFlag) Set(value string) error {
+	if strings.TrimSpace(value) == "" {
+		return errors.New("address must not be empty")
+	}
+	*f = append(*f, value)
+	return nil
+}
+
 func buildMessage(from, to *mail.Address, subject, body string) ([]byte, error) {
+	return buildMessageWithRecipients(from, []*mail.Address{to}, nil, subject, body)
+}
+
+func buildMessageWithRecipients(from *mail.Address, to, cc []*mail.Address, subject, body string) ([]byte, error) {
 	if strings.ContainsAny(subject, "\r\n") {
 		return nil, errors.New("subject must not contain CR or LF")
 	}
 	if strings.ContainsAny(body, "\x00") {
 		return nil, errors.New("message body must not contain NUL")
 	}
-	message := fmt.Sprintf("From: %s\r\nTo: %s\r\nDate: %s\r\nSubject: %s\r\nMIME-Version: 1.0\r\nContent-Type: text/plain; charset=UTF-8\r\n\r\n%s\r\n", headerAddress(from), headerAddress(to), time.Now().UTC().Format(time.RFC1123Z), subject, body)
-	return []byte(message), nil
+	if len(to) == 0 {
+		return nil, errors.New("at least one recipient is required")
+	}
+	var message strings.Builder
+	fmt.Fprintf(&message, "From: %s\r\nTo: %s\r\n", headerAddress(from), headerAddresses(to))
+	if len(cc) > 0 {
+		message.WriteString("Cc: ")
+		message.WriteString(headerAddresses(cc))
+		message.WriteString("\r\n")
+	}
+	fmt.Fprintf(&message, "Date: %s\r\nSubject: %s\r\nMIME-Version: 1.0\r\nContent-Type: text/plain; charset=UTF-8\r\n\r\n%s\r\n", time.Now().UTC().Format(time.RFC1123Z), subject, body)
+	return []byte(message.String()), nil
+}
+
+func headerAddresses(addresses []*mail.Address) string {
+	values := make([]string, 0, len(addresses))
+	for _, address := range addresses {
+		values = append(values, headerAddress(address))
+	}
+	return strings.Join(values, ", ")
 }
 
 func headerAddress(address *mail.Address) string {
