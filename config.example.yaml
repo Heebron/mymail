@@ -6,7 +6,7 @@ imap_listen: 0.0.0.0:1143
 # tls_cert_file: /etc/mymail/tls.crt
 # tls_key_file: /etc/mymail/tls.key
 # Values may use environment variables, for example: ${HOME}/mymail
-maildir_root: /tmp/mymail
+maildir_root: /mnt/probox/@email
 hostname: leopard.thepratts.info
 users:
   kpratt@leopard.thepratts.info:

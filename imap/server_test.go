@@ -11,8 +11,10 @@ import (
 	"log/slog"
 	"net"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"mymail/maildir"
 )
@@ -101,6 +103,137 @@ func TestHandleAuthenticatePlain(t *testing.T) {
 	}
 	if strings.Contains(logs.String(), response) || strings.Contains(logs.String(), "changeit") {
 		t.Fatalf("authentication secret was logged: %q", logs.String())
+	}
+}
+
+func TestIdleReportsNewMessages(t *testing.T) {
+	store, err := maildir.New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var logs bytes.Buffer
+	server := &Server{
+		Hostname: "mail.example.test",
+		Store:    store,
+		Resolve: func(username string) (string, bool) {
+			return "kpratt", strings.EqualFold(username, "kpratt")
+		},
+		Authenticate: func(username, password string) bool {
+			return username == "kpratt" && password == "changeit"
+		},
+		Logger: slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug})),
+	}
+	serverConn, clientConn := net.Pipe()
+	defer clientConn.Close()
+	defer serverConn.Close()
+	go server.handle(context.Background(), serverConn)
+
+	reader := bufio.NewReader(clientConn)
+	readLine := func() string {
+		t.Helper()
+		line, readErr := reader.ReadString('\n')
+		if readErr != nil {
+			t.Fatal(readErr)
+		}
+		return strings.TrimRight(line, "\r\n")
+	}
+	writeLine := func(line string) {
+		t.Helper()
+		if _, writeErr := fmt.Fprintf(clientConn, "%s\r\n", line); writeErr != nil {
+			t.Fatal(writeErr)
+		}
+	}
+
+	if greeting := readLine(); !strings.HasPrefix(greeting, "* OK") {
+		t.Fatalf("greeting = %q", greeting)
+	}
+	writeLine("a001 LOGIN kpratt changeit")
+	if result := readLine(); !strings.HasPrefix(result, "a001 OK") || !strings.Contains(result, " IDLE ") {
+		t.Fatalf("login result = %q", result)
+	}
+	writeLine("a002 SELECT INBOX")
+	for i := 0; i < 5; i++ {
+		readLine()
+	}
+	writeLine("a003 IDLE")
+	if result := readLine(); result != "+ idling" {
+		t.Fatalf("idle result = %q", result)
+	}
+	if _, err := store.Deliver("kpratt", []byte("Subject: idle\r\n\r\nmessage\r\n")); err != nil {
+		t.Fatal(err)
+	}
+	if messages, err := store.List("kpratt"); err != nil || len(messages) != 1 {
+		t.Fatalf("delivered messages = %d, error = %v", len(messages), err)
+	}
+	if err := clientConn.SetReadDeadline(time.Now().Add(2 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	line, readErr := reader.ReadString('\n')
+	if readErr != nil || strings.TrimRight(line, "\r\n") != "* 1 EXISTS" {
+		t.Fatalf("idle update = %q, error = %v, logs = %q", strings.TrimRight(line, "\r\n"), readErr, logs.String())
+	}
+	if recent := readLine(); recent != "* 1 RECENT" {
+		t.Fatalf("idle recent update = %q", recent)
+	}
+	messages, listErr := store.List("kpratt")
+	if listErr != nil || len(messages) != 1 || messages[0].Flags['S'] {
+		t.Fatalf("delivered message flags = %#v, error = %v; want unread", messages, listErr)
+	}
+	if err := clientConn.SetReadDeadline(time.Time{}); err != nil {
+		t.Fatal(err)
+	}
+	writeLine("DONE")
+	if result := readLine(); result != "a003 OK IDLE terminated" {
+		t.Fatalf("idle completion = %q", result)
+	}
+	if _, err := store.Deliver("kpratt", []byte("Subject: idle before command\r\n\r\nmessage\r\n")); err != nil {
+		t.Fatal(err)
+	}
+	writeLine("a004 IDLE")
+	if result := readLine(); result != "+ idling" {
+		t.Fatalf("second idle result = %q", result)
+	}
+	if exists := readLine(); exists != "* 2 EXISTS" {
+		t.Fatalf("idle catch-up exists = %q", exists)
+	}
+	if recent := readLine(); recent != "* 2 RECENT" {
+		t.Fatalf("idle catch-up recent = %q", recent)
+	}
+	writeLine("DONE")
+	if result := readLine(); result != "a004 OK IDLE terminated" {
+		t.Fatalf("second idle completion = %q", result)
+	}
+}
+
+func TestIdleReportsFlagChanges(t *testing.T) {
+	store, err := maildir.New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Deliver("alice", []byte("Subject: flag change\r\n\r\nmessage\r\n")); err != nil {
+		t.Fatal(err)
+	}
+	before, err := store.List("alice")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.SetFlags("alice", before[0], map[byte]bool{'S': true}); err != nil {
+		t.Fatal(err)
+	}
+	after, err := store.List("alice")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var responses []string
+	err = writeIdleChanges(func(format string, args ...any) error {
+		responses = append(responses, fmt.Sprintf(format, args...))
+		return nil
+	}, idleMessagesByUID(before), after)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(responses) != 1 || responses[0] != fmt.Sprintf("* 1 FETCH (UID %d FLAGS (\\Seen))", before[0].UID) {
+		t.Fatalf("idle flag responses = %#v", responses)
 	}
 }
 
@@ -301,8 +434,18 @@ func TestHandleAppendVisibleThroughUIDRefresh(t *testing.T) {
 	if result := readLine(); !strings.HasPrefix(result, "a004 OK") {
 		t.Fatalf("UID search completion = %q", result)
 	}
+	if _, err := store.Deliver("kpratt", []byte("From: second@example.test\r\nSubject: delivered\r\n\r\nsecond\r\n")); err != nil {
+		t.Fatal(err)
+	}
+	writeLine("a004b UID SEARCH UID 2:*")
+	if result := readLine(); result != "* SEARCH 2" {
+		t.Fatalf("UID range search result = %q", result)
+	}
+	if result := readLine(); !strings.HasPrefix(result, "a004b OK") {
+		t.Fatalf("UID range search completion = %q", result)
+	}
 
-	writeLine("a005 UID FETCH 1:* (UID BODY.PEEK[])")
+	writeLine("a005 UID FETCH 1 (UID BODY.PEEK[])")
 	fetch := readLine()
 	if !strings.Contains(fetch, "UID 1") {
 		t.Fatalf("UID fetch result = %q", fetch)
@@ -340,8 +483,126 @@ func TestHandleAppendVisibleThroughUIDRefresh(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(messages) != 1 || messages[0].Flags['S'] {
-		t.Fatalf("stored flags after UID STORE = %#v, want unread", messages)
+	if len(messages) != 2 || messages[0].Flags['S'] {
+		t.Fatalf("stored messages after UID STORE = %#v, want two messages with the first unread", messages)
+	}
+}
+
+func TestUIDFetchKeepsUIDForNewMessageWhenDateOrderChanges(t *testing.T) {
+	store, err := maildir.New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err := store.Deliver("alice", []byte("Subject: first\r\n\r\nfirst\r\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.List("alice"); err != nil {
+		t.Fatal(err)
+	}
+	future := time.Now().Add(time.Hour)
+	if err := os.Chtimes(first.Path, future, future); err != nil {
+		t.Fatal(err)
+	}
+	second, err := store.Deliver("alice", []byte("Subject: second\r\n\r\nsecond\r\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := &Server{Store: store}
+	state := &session{authenticated: true, selected: true, mailbox: "alice"}
+	var output bytes.Buffer
+	writer := bufio.NewWriter(&output)
+	server.fetch("a001", []string{"2", "(UID BODY.PEEK[])"}, state, writer, true)
+	if got := output.String(); !strings.Contains(got, "second") || strings.Contains(got, "first") {
+		t.Fatalf("UID 2 fetch = %q; want the newly delivered message %q", got, second.Filename)
+	}
+}
+
+func TestUIDFetchReturnsRequestedBodySections(t *testing.T) {
+	store, err := maildir.New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Deliver("alice", []byte("From: sender@example.test\r\nTo: alice@example.test\r\nSubject: section test\r\n\r\nmessage body\r\n")); err != nil {
+		t.Fatal(err)
+	}
+	server := &Server{Store: store}
+	state := &session{authenticated: true, selected: true, mailbox: "alice"}
+	var output bytes.Buffer
+	writer := bufio.NewWriter(&output)
+	server.fetch("a001", []string{"1", "(UID BODY.PEEK[HEADER.FIELDS (FROM SUBJECT)] BODY.PEEK[TEXT])"}, state, writer, true)
+	got := output.String()
+	if !strings.Contains(got, "BODY[HEADER.FIELDS (FROM SUBJECT)]") || strings.Contains(got, "BODY.PEEK[") || !strings.Contains(got, "From: sender@example.test\r\n") || !strings.Contains(got, "Subject: section test\r\n") {
+		t.Fatalf("header fetch response = %q", got)
+	}
+	if strings.Contains(got, "To: alice@example.test\r\n") {
+		t.Fatalf("header fetch returned an unrequested field: %q", got)
+	}
+	if !strings.Contains(got, "BODY[TEXT]") || !strings.Contains(got, "message body\r\n") {
+		t.Fatalf("text fetch response = %q", got)
+	}
+	messages, err := store.List("alice")
+	if err != nil || len(messages) != 1 || messages[0].Flags['S'] {
+		t.Fatalf("PEEK fetch changed message flags = %#v, error = %v; want unread", messages, err)
+	}
+}
+
+func TestUIDFetchReturnsEvolutionMessageMetadata(t *testing.T) {
+	store, err := maildir.New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	message := []byte("From: sender@example.test\r\nTo: alice@example.test\r\nDate: Sun, 18 Oct 2026 15:19:34 +0000\r\nSubject: Evolution metadata\r\nContent-Type: text/plain; charset=UTF-8\r\n\r\nmessage body\r\n")
+	if _, err := store.Deliver("alice", message); err != nil {
+		t.Fatal(err)
+	}
+	server := &Server{Store: store}
+	state := &session{authenticated: true, selected: true, mailbox: "alice"}
+	var output bytes.Buffer
+	writer := bufio.NewWriter(&output)
+	server.fetch("a001", []string{"1", "(UID RFC822.SIZE FLAGS INTERNALDATE BODYSTRUCTURE ENVELOPE BODY.PEEK[HEADER.FIELDS (FROM SUBJECT CONTENT-TYPE)])"}, state, writer, true)
+	if err := writer.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	got := output.String()
+	for _, field := range []string{"RFC822.SIZE", "FLAGS", "INTERNALDATE", "BODYSTRUCTURE", "ENVELOPE", "BODY[HEADER.FIELDS (FROM SUBJECT CONTENT-TYPE)]"} {
+		if !strings.Contains(got, field) {
+			t.Fatalf("Evolution fetch response = %q; missing %s", got, field)
+		}
+	}
+}
+
+func TestHeaderFetchKeepsMessageUnread(t *testing.T) {
+	store, err := maildir.New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Deliver("alice", []byte("From: sender@example.test\r\nSubject: unread test\r\n\r\nmessage body\r\n")); err != nil {
+		t.Fatal(err)
+	}
+	server := &Server{Store: store}
+	state := &session{authenticated: true, selected: true, mailbox: "alice"}
+	var output bytes.Buffer
+	writer := bufio.NewWriter(&output)
+	server.fetch("a001", []string{"1", "(UID BODY[HEADER.FIELDS (FROM SUBJECT)])"}, state, writer, true)
+	if err := writer.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(output.String(), "FLAGS (\\Recent)") {
+		t.Fatalf("new message fetch flags = %q; want \\Recent", output.String())
+	}
+	messages, err := store.List("alice")
+	if err != nil || len(messages) != 1 || messages[0].Flags['S'] {
+		t.Fatalf("header fetch changed message flags = %#v, error = %v; want unread", messages, err)
+	}
+	output.Reset()
+	server.fetch("a002", []string{"1", "(UID BODY[])"}, state, writer, true)
+	messages, err = store.List("alice")
+	if err != nil || len(messages) != 1 || !messages[0].Flags['S'] {
+		t.Fatalf("full body fetch flags = %#v, error = %v; want Seen", messages, err)
+	}
+	if strings.Contains(output.String(), "\\Recent") {
+		t.Fatalf("seen message fetch still reported \\Recent: %q", output.String())
 	}
 }
 
@@ -508,6 +769,60 @@ func TestStatusQuotesMailboxWithSpaces(t *testing.T) {
 	}
 	if result := readLine(); result != "a003 OK STATUS completed" {
 		t.Fatalf("status completion = %q", result)
+	}
+}
+
+func TestSelectReportsRecentMessages(t *testing.T) {
+	store, err := maildir.New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Deliver("alice", []byte("Subject: recent\r\n\r\nmessage\r\n")); err != nil {
+		t.Fatal(err)
+	}
+	server := &Server{
+		Hostname: "mail.example.test",
+		Store:    store,
+		Resolve: func(username string) (string, bool) {
+			return "alice", strings.EqualFold(username, "alice")
+		},
+		Authenticate: func(username, password string) bool {
+			return username == "alice" && password == "secret"
+		},
+		Logger: slog.Default(),
+	}
+	serverConn, clientConn := net.Pipe()
+	defer clientConn.Close()
+	defer serverConn.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go server.handle(ctx, serverConn)
+
+	reader := bufio.NewReader(clientConn)
+	readLine := func() string {
+		t.Helper()
+		line, readErr := reader.ReadString('\n')
+		if readErr != nil {
+			t.Fatal(readErr)
+		}
+		return strings.TrimRight(line, "\r\n")
+	}
+	writeLine := func(line string) {
+		t.Helper()
+		if _, writeErr := fmt.Fprintf(clientConn, "%s\r\n", line); writeErr != nil {
+			t.Fatal(writeErr)
+		}
+	}
+
+	readLine()
+	writeLine("a001 LOGIN alice secret")
+	if result := readLine(); !strings.HasPrefix(result, "a001 OK") {
+		t.Fatalf("login result = %q", result)
+	}
+	writeLine("a002 SELECT INBOX")
+	readLine()
+	if recent := readLine(); recent != "* 1 RECENT" {
+		t.Fatalf("recent response = %q, want %q", recent, "* 1 RECENT")
 	}
 }
 

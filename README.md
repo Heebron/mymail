@@ -7,7 +7,9 @@ service.
 
 ## Features
 
-- Atomic Maildir delivery using `tmp` followed by a rename into `new`.
+- Atomic Maildir delivery using `tmp` followed by a rename into `new`; IMAP
+  reads both `new` and `cur` and preserves message UIDs when files move or are
+  reordered.
 - Concurrent SMTP sessions with `EHLO`, `MAIL`, `RCPT`, `DATA`, `RSET`, `AUTH
   PLAIN`, and `AUTH LOGIN`.
 - Recipient validation prevents delivery to unknown configured users.
@@ -15,7 +17,8 @@ service.
   other application-specific policies.
 - IMAP4rev1 access to `INBOX` and user-created folders, including `CAPABILITY`, `NOOP`, `LOGIN`,
   `AUTHENTICATE`, `SELECT`, `EXAMINE`, `LIST`, `LSUB`, `NAMESPACE`, `ID`,
-  `IDLE`, `STATUS`, `APPEND`, `FETCH`, `STORE`, `SEARCH`, `COPY`, `CHECK`,
+  `IDLE` notifications for newly delivered messages, `STATUS`, `APPEND`, `FETCH`,
+  `STORE`, `SEARCH`, `COPY`, `CHECK`,
   `EXPUNGE`, `CLOSE`, `LOGOUT`, and the corresponding `UID FETCH`, `UID STORE`,
   `UID SEARCH`, `UID COPY`, and `UID EXPUNGE` actions. `APPEND` and `COPY`
   report `APPENDUID` and `COPYUID` responses with the `UIDPLUS` capability;
@@ -52,6 +55,21 @@ Use a reverse proxy, firewall rules, or privileged socket activation when
 exposing standard ports. Optional implicit TLS listeners can run simultaneously
 with the non-TLS listeners by setting `smtp_tls_listen` and `imap_tls_listen`,
 along with `tls_cert_file` and `tls_key_file`.
+
+To send a test message through the default SMTP listener, build and run the
+small `mymail-send` client:
+
+```sh
+go build -o mymail-send ./cmd/mymail-send
+./mymail-send -from kpratt@leopard.thepratts.info -to kpratt@leopard.thepratts.info \
+  -username kpratt -password changeit
+```
+
+Use `-server host:port` for another endpoint, `-tls` for an implicit TLS
+listener, and `-insecure-skip-verify` only when testing with a certificate that
+cannot be verified. The client also accepts `-subject` and `-body`; SMTP
+authentication is optional because the development server accepts deliveries
+without authentication.
 
 ## Configuration
 

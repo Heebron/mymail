@@ -293,10 +293,14 @@ func parseSMTPPath(argument, prefix string) (string, bool) {
 		return "", false
 	}
 	path := strings.TrimSpace(argument[len(prefix):])
-	if len(path) < 2 || path[0] != '<' || path[len(path)-1] != '>' {
+	if len(path) < 2 || path[0] != '<' {
 		return "", false
 	}
-	return strings.TrimSpace(path[1 : len(path)-1]), true
+	closing := strings.IndexByte(path, '>')
+	if closing < 1 || (closing+1 < len(path) && path[closing+1] != ' ' && path[closing+1] != '\t') {
+		return "", false
+	}
+	return strings.TrimSpace(path[1:closing]), true
 }
 
 func readData(reader *bufio.Reader) ([]byte, error) {

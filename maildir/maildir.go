@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -20,7 +21,9 @@ var ErrInvalidMailbox = errors.New("invalid mailbox name")
 type Message struct {
 	Filename     string
 	Path         string
+	UID          uint32
 	Flags        map[byte]bool
+	Recent       bool
 	Size         int64
 	InternalDate time.Time
 }
@@ -304,7 +307,7 @@ func (s *Store) Deliver(user string, data []byte) (Message, error) {
 		return Message{}, fmt.Errorf("commit message: %w", err)
 	}
 	ok = true
-	return Message{Filename: unique, Path: final, Size: int64(len(data)), InternalDate: time.Now()}, nil
+	return Message{Filename: unique, Path: final, Recent: true, Size: int64(len(data)), InternalDate: time.Now()}, nil
 }
 
 func uniqueName() (string, error) {
@@ -316,14 +319,15 @@ func uniqueName() (string, error) {
 }
 
 // List returns a stable snapshot of messages in new and cur, sorted by date
-// and filename. The returned flag maps are independent from the store.
+// and filename. The returned flag maps are independent from the store. Each
+// message also receives a persistent UID, independent of its list position.
 func (s *Store) List(user string) ([]Message, error) {
 	lock, err := s.mailboxLock(user)
 	if err != nil {
 		return nil, err
 	}
-	lock.RLock()
-	defer lock.RUnlock()
+	lock.Lock()
+	defer lock.Unlock()
 	mailbox, err := s.mailboxPath(user)
 	if err != nil {
 		return nil, err
@@ -350,6 +354,7 @@ func (s *Store) List(user string) ([]Message, error) {
 			messages = append(messages, Message{
 				Filename: name,
 				Path:     filepath.Join(mailbox, dir, name),
+				Recent:   dir == "new",
 				Flags:    flags,
 				Size:     info.Size(), InternalDate: info.ModTime(),
 			})
@@ -361,7 +366,95 @@ func (s *Store) List(user string) ([]Message, error) {
 		}
 		return messages[i].InternalDate.Before(messages[j].InternalDate)
 	})
+	if len(messages) == 0 {
+		return messages, nil
+	}
+	uids, nextUID, changed, err := loadUIDs(mailbox)
+	if err != nil {
+		return nil, err
+	}
+	for index := range messages {
+		key := uidKey(messages[index].Filename)
+		uid, ok := uids[key]
+		if !ok {
+			uid = nextUID
+			if nextUID == ^uint32(0) {
+				nextUID = 1
+			} else {
+				nextUID++
+			}
+			uids[key] = uid
+			changed = true
+		}
+		messages[index].UID = uid
+	}
+	if changed {
+		if err := saveUIDs(mailbox, uids, nextUID); err != nil {
+			return nil, err
+		}
+	}
 	return messages, nil
+}
+
+const uidListFilename = ".mymail-uidlist"
+
+func uidKey(filename string) string {
+	if index := strings.Index(filename, ":2,"); index >= 0 {
+		return filename[:index]
+	}
+	return filename
+}
+
+func loadUIDs(mailbox string) (map[string]uint32, uint32, bool, error) {
+	data, err := os.ReadFile(filepath.Join(mailbox, uidListFilename))
+	if os.IsNotExist(err) {
+		return make(map[string]uint32), 1, true, nil
+	}
+	if err != nil {
+		return nil, 0, false, fmt.Errorf("read message UIDs: %w", err)
+	}
+	uids := make(map[string]uint32)
+	nextUID := uint32(1)
+	for _, line := range strings.Split(string(data), "\n") {
+		fields := strings.SplitN(strings.TrimSpace(line), "\t", 2)
+		if len(fields) != 2 {
+			continue
+		}
+		if fields[0] == "next" {
+			value, parseErr := strconv.ParseUint(fields[1], 10, 32)
+			if parseErr == nil && value > 0 {
+				nextUID = uint32(value)
+			}
+			continue
+		}
+		value, parseErr := strconv.ParseUint(fields[0], 10, 32)
+		if parseErr == nil && value > 0 && fields[1] != "" {
+			uids[fields[1]] = uint32(value)
+		}
+	}
+	return uids, nextUID, false, nil
+}
+
+func saveUIDs(mailbox string, uids map[string]uint32, nextUID uint32) error {
+	keys := make([]string, 0, len(uids))
+	for key := range uids {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	var content strings.Builder
+	fmt.Fprintf(&content, "next\t%d\n", nextUID)
+	for _, key := range keys {
+		fmt.Fprintf(&content, "%d\t%s\n", uids[key], key)
+	}
+	temporary := filepath.Join(mailbox, uidListFilename+".tmp")
+	if err := os.WriteFile(temporary, []byte(content.String()), 0600); err != nil {
+		return fmt.Errorf("write message UIDs: %w", err)
+	}
+	if err := os.Rename(temporary, filepath.Join(mailbox, uidListFilename)); err != nil {
+		_ = os.Remove(temporary)
+		return fmt.Errorf("commit message UIDs: %w", err)
+	}
+	return nil
 }
 
 func parseFlags(filename string) map[byte]bool {
@@ -413,7 +506,7 @@ func (s *Store) SetFlags(user string, message Message, flags map[byte]bool) (Mes
 	if err := os.Rename(oldPath, newPath); err != nil {
 		return Message{}, fmt.Errorf("update message flags: %w", err)
 	}
-	return Message{Filename: newName, Path: newPath, Flags: cloneFlags(flags), Size: message.Size, InternalDate: message.InternalDate}, nil
+	return Message{Filename: newName, Path: newPath, UID: message.UID, Flags: cloneFlags(flags), Size: message.Size, InternalDate: message.InternalDate}, nil
 }
 
 func cloneFlags(flags map[byte]bool) map[byte]bool {
