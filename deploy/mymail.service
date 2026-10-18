@@ -1,0 +1,22 @@
+[Unit]
+Description=MyMail combined IMAP and SMTP server
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/mymail -config /etc/mymail/config.yaml
+Restart=on-failure
+RestartSec=3
+User=mymail
+Group=mymail
+RuntimeDirectory=mymail
+StateDirectory=mymail
+ConfigurationDirectory=mymail
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/mymail
+
+[Install]
+WantedBy=multi-user.target

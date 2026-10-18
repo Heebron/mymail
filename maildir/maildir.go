@@ -1,0 +1,324 @@
+// Package maildir provides a concurrent-safe Maildir mailbox store.
+package maildir
+
+import (
+	"crypto/rand"
+	"errors"
+	"fmt"
+	"io"
+	"os"
+	"path/filepath"
+	"sort"
+	"strings"
+	"sync"
+	"time"
+)
+
+var ErrInvalidMailbox = errors.New("invalid mailbox name")
+
+// Message is the metadata needed by the IMAP server for one Maildir message.
+type Message struct {
+	Filename     string
+	Path         string
+	Flags        map[byte]bool
+	Size         int64
+	InternalDate time.Time
+}
+
+// Store manages mailboxes below Root. A Maildir write is committed with one
+// rename, so readers never observe a partially written message.
+type Store struct {
+	Root  string
+	locks sync.Map // mailbox name -> *sync.RWMutex
+}
+
+func New(root string) (*Store, error) {
+	if root == "" {
+		return nil, errors.New("maildir root is empty")
+	}
+	if err := os.MkdirAll(root, 0700); err != nil {
+		return nil, fmt.Errorf("create maildir root: %w", err)
+	}
+	return &Store{Root: root}, nil
+}
+
+func (s *Store) mailboxPath(user string) (string, error) {
+	parts := strings.Split(strings.TrimSpace(user), "/")
+	if len(parts) > 2 || !validMailboxPart(parts[0]) {
+		return "", ErrInvalidMailbox
+	}
+	path := filepath.Join(s.Root, parts[0], "Maildir")
+	if len(parts) == 2 {
+		if !validMailboxPart(parts[1]) {
+			return "", ErrInvalidMailbox
+		}
+		path = filepath.Join(path, "."+parts[1])
+	}
+	return path, nil
+}
+
+func validMailboxPart(value string) bool {
+	return value != "" && value != "." && value != ".." && !strings.ContainsAny(value, `/\`) && !strings.Contains(value, "\x00")
+}
+
+func (s *Store) mailboxLock(user string) (*sync.RWMutex, error) {
+	if _, err := s.mailboxPath(user); err != nil {
+		return nil, err
+	}
+	lock := &sync.RWMutex{}
+	actual, _ := s.locks.LoadOrStore(strings.TrimSpace(user), lock)
+	return actual.(*sync.RWMutex), nil
+}
+
+// Ensure creates the Maildir directory layout for a user.
+func (s *Store) Ensure(user string) error {
+	lock, err := s.mailboxLock(user)
+	if err != nil {
+		return err
+	}
+	lock.Lock()
+	defer lock.Unlock()
+	return s.ensureLocked(user)
+}
+
+func (s *Store) ensureLocked(user string) error {
+	path, err := s.mailboxPath(user)
+	if err != nil {
+		return err
+	}
+	for _, dir := range []string{path, filepath.Join(path, "tmp"), filepath.Join(path, "new"), filepath.Join(path, "cur")} {
+		if err := os.MkdirAll(dir, 0700); err != nil {
+			return fmt.Errorf("create mailbox %q: %w", user, err)
+		}
+	}
+	return nil
+}
+
+// ListMailboxes returns the child Maildir++ folders belonging to a user.
+// INBOX is represented by the user mailbox itself and is not included.
+func (s *Store) ListMailboxes(user string) ([]string, error) {
+	if !validMailboxPart(strings.TrimSpace(user)) || strings.Contains(user, "/") {
+		return nil, ErrInvalidMailbox
+	}
+	lock, err := s.mailboxLock(user)
+	if err != nil {
+		return nil, err
+	}
+	lock.RLock()
+	defer lock.RUnlock()
+	mailbox, err := s.mailboxPath(user)
+	if err != nil {
+		return nil, err
+	}
+	entries, err := os.ReadDir(mailbox)
+	if os.IsNotExist(err) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("list mailboxes: %w", err)
+	}
+	var folders []string
+	for _, entry := range entries {
+		name := entry.Name()
+		if !entry.IsDir() || len(name) < 2 || name[0] != '.' {
+			continue
+		}
+		if _, err := os.Stat(filepath.Join(mailbox, name, "cur")); err != nil {
+			continue
+		}
+		if _, err := os.Stat(filepath.Join(mailbox, name, "new")); err != nil {
+			continue
+		}
+		if _, err := os.Stat(filepath.Join(mailbox, name, "tmp")); err != nil {
+			continue
+		}
+		folders = append(folders, strings.TrimPrefix(name, "."))
+	}
+	sort.Strings(folders)
+	return folders, nil
+}
+
+// Deliver atomically adds a message to new. data is copied by the operating
+// system before this method returns and may be reused by the caller.
+func (s *Store) Deliver(user string, data []byte) (Message, error) {
+	lock, err := s.mailboxLock(user)
+	if err != nil {
+		return Message{}, err
+	}
+	lock.Lock()
+	defer lock.Unlock()
+	if err := s.ensureLocked(user); err != nil {
+		return Message{}, err
+	}
+	mailbox, _ := s.mailboxPath(user)
+	unique, err := uniqueName()
+	if err != nil {
+		return Message{}, err
+	}
+	tmp := filepath.Join(mailbox, "tmp", unique)
+	final := filepath.Join(mailbox, "new", unique)
+	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
+	if err != nil {
+		return Message{}, fmt.Errorf("create delivery temporary file: %w", err)
+	}
+	ok := false
+	defer func() {
+		_ = f.Close()
+		if !ok {
+			_ = os.Remove(tmp)
+		}
+	}()
+	if _, err := f.Write(data); err != nil {
+		return Message{}, fmt.Errorf("write message: %w", err)
+	}
+	if err := f.Sync(); err != nil {
+		return Message{}, fmt.Errorf("sync message: %w", err)
+	}
+	if err := f.Close(); err != nil {
+		return Message{}, fmt.Errorf("close message: %w", err)
+	}
+	if err := os.Rename(tmp, final); err != nil {
+		return Message{}, fmt.Errorf("commit message: %w", err)
+	}
+	ok = true
+	return Message{Filename: unique, Path: final, Size: int64(len(data)), InternalDate: time.Now()}, nil
+}
+
+func uniqueName() (string, error) {
+	var random [12]byte
+	if _, err := io.ReadFull(rand.Reader, random[:]); err != nil {
+		return "", fmt.Errorf("generate message id: %w", err)
+	}
+	return fmt.Sprintf("%d.%d.%x", time.Now().UnixNano(), os.Getpid(), random[:]), nil
+}
+
+// List returns a stable snapshot of messages in new and cur, sorted by date
+// and filename. The returned flag maps are independent from the store.
+func (s *Store) List(user string) ([]Message, error) {
+	lock, err := s.mailboxLock(user)
+	if err != nil {
+		return nil, err
+	}
+	lock.RLock()
+	defer lock.RUnlock()
+	mailbox, err := s.mailboxPath(user)
+	if err != nil {
+		return nil, err
+	}
+	var messages []Message
+	for _, dir := range []string{"new", "cur"} {
+		entries, err := os.ReadDir(filepath.Join(mailbox, dir))
+		if os.IsNotExist(err) {
+			continue
+		}
+		if err != nil {
+			return nil, fmt.Errorf("list mailbox: %w", err)
+		}
+		for _, entry := range entries {
+			if !entry.Type().IsRegular() {
+				continue
+			}
+			info, err := entry.Info()
+			if err != nil {
+				return nil, fmt.Errorf("stat message: %w", err)
+			}
+			name := entry.Name()
+			flags := parseFlags(name)
+			messages = append(messages, Message{
+				Filename: name,
+				Path:     filepath.Join(mailbox, dir, name),
+				Flags:    flags,
+				Size:     info.Size(), InternalDate: info.ModTime(),
+			})
+		}
+	}
+	sort.SliceStable(messages, func(i, j int) bool {
+		if messages[i].InternalDate.Equal(messages[j].InternalDate) {
+			return messages[i].Filename < messages[j].Filename
+		}
+		return messages[i].InternalDate.Before(messages[j].InternalDate)
+	})
+	return messages, nil
+}
+
+func parseFlags(filename string) map[byte]bool {
+	flags := make(map[byte]bool)
+	if index := strings.Index(filename, ":2,"); index >= 0 {
+		for i := index + 3; i < len(filename); i++ {
+			flags[filename[i]] = true
+		}
+	}
+	return flags
+}
+
+// Read opens a message from a snapshot returned by List.
+func (s *Store) Read(message Message) ([]byte, error) {
+	return os.ReadFile(message.Path)
+}
+
+// SetFlags renames a message according to Maildir's :2, flag suffix.
+func (s *Store) SetFlags(user string, message Message, flags map[byte]bool) (Message, error) {
+	lock, err := s.mailboxLock(user)
+	if err != nil {
+		return Message{}, err
+	}
+	lock.Lock()
+	defer lock.Unlock()
+	mailbox, err := s.mailboxPath(user)
+	if err != nil {
+		return Message{}, err
+	}
+	clean := message.Filename
+	if index := strings.Index(clean, ":2,"); index >= 0 {
+		clean = clean[:index]
+	}
+	var flagNames []string
+	for _, flag := range []byte{'D', 'F', 'R', 'S', 'T'} {
+		if flags[flag] {
+			flagNames = append(flagNames, string(flag))
+		}
+	}
+	newName := clean + ":2," + strings.Join(flagNames, "")
+	oldPath := message.Path
+	if _, err := os.Stat(oldPath); err != nil {
+		return Message{}, err
+	}
+	newPath := filepath.Join(mailbox, "cur", newName)
+	if filepath.Dir(oldPath) != filepath.Join(mailbox, "cur") {
+		newPath = filepath.Join(mailbox, "cur", newName)
+	}
+	if err := os.Rename(oldPath, newPath); err != nil {
+		return Message{}, fmt.Errorf("update message flags: %w", err)
+	}
+	return Message{Filename: newName, Path: newPath, Flags: cloneFlags(flags), Size: message.Size, InternalDate: message.InternalDate}, nil
+}
+
+func cloneFlags(flags map[byte]bool) map[byte]bool {
+	copy := make(map[byte]bool, len(flags))
+	for flag, set := range flags {
+		if set {
+			copy[flag] = true
+		}
+	}
+	return copy
+}
+
+func (s *Store) Delete(message Message) error {
+	if err := os.Remove(message.Path); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return nil
+}
+
+// DeleteFrom removes a message while coordinating with other operations on
+// the same mailbox. Delete is retained for callers that already hold a
+// mailbox lock or only need best-effort cleanup of a stale path.
+func (s *Store) DeleteFrom(user string, message Message) error {
+	lock, err := s.mailboxLock(user)
+	if err != nil {
+		return err
+	}
+	lock.Lock()
+	defer lock.Unlock()
+	return s.Delete(message)
+}

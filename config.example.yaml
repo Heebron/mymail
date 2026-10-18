@@ -1,0 +1,18 @@
+smtp_listen: 0.0.0.0:2525
+imap_listen: 0.0.0.0:1143
+# Optional implicit TLS listeners can run alongside the non-TLS listeners.
+# smtp_tls_listen: 0.0.0.0:465
+# imap_tls_listen: 0.0.0.0:993
+# tls_cert_file: /etc/mymail/tls.crt
+# tls_key_file: /etc/mymail/tls.key
+# Values may use environment variables, for example: ${HOME}/mymail
+maildir_root: /tmp/mymail
+hostname: leopard.thepratts.info
+users:
+  kpratt@leopard.thepratts.info:
+#    password_sha256: replace-with-lowercase-sha256-hex
+    password: changeit
+    mailbox: kpratt
+  bob@mail.example.test:
+    password: change-me
+    mailbox: bob
