@@ -326,7 +326,7 @@ func (s *Server) handle(ctx context.Context, conn net.Conn) {
 				continue
 			}
 			unseen := countUnseen(messages)
-			if write("* STATUS %s (MESSAGES %d RECENT 0 UNSEEN %d UIDNEXT %d UIDVALIDITY 1)", args[0], len(messages), unseen, len(messages)+1) != nil || write("%s OK STATUS completed", tag) != nil {
+			if write("* STATUS %s (MESSAGES %d RECENT 0 UNSEEN %d UIDNEXT %d UIDVALIDITY 1)", quoteIMAPString(args[0]), len(messages), unseen, len(messages)+1) != nil || write("%s OK STATUS completed", tag) != nil {
 				return
 			}
 		case "FETCH":
@@ -421,12 +421,63 @@ func (s *Server) handle(ctx context.Context, conn net.Conn) {
 				continue
 			}
 			_ = write("%s OK CREATE completed", tag)
-		case "DELETE", "RENAME":
+		case "DELETE":
 			if !state.authenticated {
 				_ = write("%s NO authenticate first", tag)
 				continue
 			}
-			_ = write("%s NO only mailbox creation is supported", tag)
+			if len(args) != 1 {
+				_ = write("%s BAD DELETE requires a mailbox", tag)
+				continue
+			}
+			mailbox, ok := resolveMailbox(state.rootMailbox, args[0])
+			if !ok || mailbox == state.rootMailbox {
+				_ = write("%s NO cannot delete INBOX or invalid mailbox", tag)
+				continue
+			}
+			if err := s.Store.DeleteMailbox(mailbox); err != nil {
+				_ = write("%s NO cannot delete mailbox", tag)
+				continue
+			}
+			if state.selected && (state.mailbox == mailbox || strings.HasPrefix(state.mailbox, mailbox+".")) {
+				state.mailbox = state.rootMailbox
+				state.selected = false
+				state.readonly = false
+			}
+			if write("%s OK DELETE completed", tag) != nil {
+				return
+			}
+		case "RENAME":
+			if !state.authenticated {
+				_ = write("%s NO authenticate first", tag)
+				continue
+			}
+			if len(args) != 2 {
+				_ = write("%s BAD RENAME requires an old and new mailbox", tag)
+				continue
+			}
+			oldMailbox, oldOK := resolveMailbox(state.rootMailbox, args[0])
+			newMailbox, newOK := resolveMailbox(state.rootMailbox, args[1])
+			if !oldOK || !newOK || oldMailbox == state.rootMailbox || newMailbox == state.rootMailbox {
+				_ = write("%s NO cannot rename INBOX or invalid mailbox", tag)
+				continue
+			}
+			if oldMailbox == newMailbox {
+				if write("%s OK RENAME completed", tag) != nil {
+					return
+				}
+				continue
+			}
+			if err := s.Store.RenameMailbox(oldMailbox, newMailbox); err != nil {
+				_ = write("%s NO cannot rename mailbox", tag)
+				continue
+			}
+			if state.selected && (state.mailbox == oldMailbox || strings.HasPrefix(state.mailbox, oldMailbox+".")) {
+				state.mailbox = newMailbox + strings.TrimPrefix(state.mailbox, oldMailbox)
+			}
+			if write("%s OK RENAME completed", tag) != nil {
+				return
+			}
 		case "SUBSCRIBE", "UNSUBSCRIBE":
 			if !state.authenticated {
 				_ = write("%s NO authenticate first", tag)
@@ -523,11 +574,23 @@ func resolveMailbox(root, name string) (string, bool) {
 	if strings.EqualFold(name, "INBOX") {
 		return root, true
 	}
-	if len(name) > len("INBOX.") && strings.EqualFold(name[:len("INBOX.")], "INBOX.") {
-		name = name[len("INBOX."):]
+	for _, prefix := range []string{"INBOX.", "INBOX/"} {
+		if len(name) > len(prefix) && strings.EqualFold(name[:len(prefix)], prefix) {
+			name = name[len(prefix):]
+			break
+		}
 	}
-	if name == "" || name == "." || name == ".." || strings.ContainsAny(name, `/\`) || strings.Contains(name, "\x00") {
+	if name == "" || name == "." || name == ".." || strings.Contains(name, "\\") || strings.Contains(name, "\x00") {
 		return "", false
+	}
+	if strings.Contains(name, "/") {
+		parts := strings.Split(name, "/")
+		for _, part := range parts {
+			if part == "" || part == "." || part == ".." {
+				return "", false
+			}
+		}
+		name = strings.Join(parts, ".")
 	}
 	return root + "/" + name, true
 }
@@ -544,7 +607,10 @@ func (s *Server) listMailboxes(tag string, args []string, state *session, writer
 		_ = writer.Flush()
 		return
 	}
-	names := append([]string{"INBOX"}, folders...)
+	names := []string{"INBOX"}
+	for _, folder := range folders {
+		names = append(names, "INBOX."+folder)
+	}
 	pattern := args[len(args)-1]
 	for _, name := range names {
 		if !matchesMailboxPattern(name, pattern) {
@@ -552,7 +618,7 @@ func (s *Server) listMailboxes(tag string, args []string, state *session, writer
 		}
 		attribute := `\HasNoChildren`
 		for _, folder := range folders {
-			if strings.HasPrefix(folder, name+".") {
+			if strings.HasPrefix("INBOX."+folder, name+".") {
 				attribute = `\HasChildren`
 				break
 			}
@@ -1008,6 +1074,10 @@ func parseLiteral(value string) (int, bool, bool) {
 	}
 	size, err := strconv.Atoi(sizeText)
 	return size, nonSynchronizing, err == nil && size >= 0
+}
+
+func quoteIMAPString(value string) string {
+	return `"` + strings.NewReplacer(`\`, `\\`, `"`, `\"`).Replace(value) + `"`
 }
 
 func tokenize(line string) []string {

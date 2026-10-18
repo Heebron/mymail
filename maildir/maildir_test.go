@@ -2,6 +2,7 @@ package maildir
 
 import (
 	"bytes"
+	"os"
 	"strings"
 	"sync"
 	"testing"
@@ -100,5 +101,71 @@ func TestFoldersAreListedAndIsolated(t *testing.T) {
 	}
 	if messages, err := store.List("alice"); err != nil || len(messages) != 0 {
 		t.Fatalf("INBOX messages = %#v, error = %v", messages, err)
+	}
+}
+
+func TestRenameMailboxAndNestedFolders(t *testing.T) {
+	store, err := New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Ensure("alice/Projects"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Ensure("alice/Projects.2026"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Deliver("alice/Projects", []byte("Subject: project\r\n\r\nbody\r\n")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Deliver("alice/Projects.2026", []byte("Subject: nested\r\n\r\nbody\r\n")); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.RenameMailbox("alice/Projects", "alice/Archive"); err != nil {
+		t.Fatal(err)
+	}
+	if messages, err := store.List("alice/Archive"); err != nil || len(messages) != 1 {
+		t.Fatalf("renamed messages = %#v, error = %v", messages, err)
+	}
+	if messages, err := store.List("alice/Archive.2026"); err != nil || len(messages) != 1 {
+		t.Fatalf("renamed nested messages = %#v, error = %v", messages, err)
+	}
+	folders, err := store.ListMailboxes("alice")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(folders, ",") != "Archive,Archive.2026" {
+		t.Fatalf("renamed folders = %q", strings.Join(folders, ","))
+	}
+}
+
+func TestDeleteMailboxAndNestedFolders(t *testing.T) {
+	store, err := New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Ensure("alice/Projects"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Ensure("alice/Projects.2026"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Deliver("alice/Projects", []byte("Subject: project\r\n\r\nbody\r\n")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Deliver("alice/Projects.2026", []byte("Subject: nested\r\n\r\nbody\r\n")); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.DeleteMailbox("alice/Projects"); err != nil {
+		t.Fatal(err)
+	}
+	if folders, err := store.ListMailboxes("alice"); err != nil || len(folders) != 0 {
+		t.Fatalf("remaining folders = %#v, error = %v", folders, err)
+	}
+	if err := store.DeleteMailbox("alice"); err != ErrInvalidMailbox {
+		t.Fatalf("delete inbox error = %v, want ErrInvalidMailbox", err)
+	}
+	if err := store.DeleteMailbox("alice/Projects"); !os.IsNotExist(err) {
+		t.Fatalf("delete missing mailbox error = %v, want not-exist", err)
 	}
 }

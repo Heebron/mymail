@@ -20,9 +20,10 @@ service.
   `UID SEARCH`, `UID COPY`, and `UID EXPUNGE` actions. `APPEND` and `COPY`
   report `APPENDUID` and `COPYUID` responses with the `UIDPLUS` capability;
   `STARTTLS` is available when TLS is configured.
-- Authenticated users can create and select Maildir folders with `CREATE`,
-  `LIST`, and `SELECT`; folder messages can also be appended to or copied into
-  the selected user's folders.
+- Authenticated users can create, select, rename, and delete Maildir folders
+  with `CREATE`, `LIST`, `SELECT`, `RENAME`, and `DELETE`; nested folders use
+  either `INBOX.Parent.Child` or `INBOX/Parent/Child` notation, and folder
+  messages can also be appended to or copied into the selected user's folders.
 - Structured logs include every IMAP action and session state; authentication
   credentials are redacted.
 - Per-user mailbox resolution and password or SHA-256 password authentication.

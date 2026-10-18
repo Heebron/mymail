@@ -138,6 +138,129 @@ func (s *Store) ListMailboxes(user string) ([]string, error) {
 	return folders, nil
 }
 
+// RenameMailbox renames a Maildir++ folder and any nested folders belonging
+// to the same user. The inbox itself cannot be renamed.
+func (s *Store) RenameMailbox(oldUser, newUser string) error {
+	oldParts := strings.Split(strings.TrimSpace(oldUser), "/")
+	newParts := strings.Split(strings.TrimSpace(newUser), "/")
+	if len(oldParts) != 2 || len(newParts) != 2 || oldParts[0] != newParts[0] || !validMailboxPart(oldParts[0]) || !validMailboxPart(oldParts[1]) || !validMailboxPart(newParts[1]) {
+		return ErrInvalidMailbox
+	}
+	if oldParts[1] == "" || newParts[1] == "" || oldParts[1] == newParts[1] {
+		return ErrInvalidMailbox
+	}
+	root := strings.TrimSpace(oldParts[0])
+	rootLock, err := s.mailboxLock(root)
+	if err != nil {
+		return err
+	}
+	oldLock, err := s.mailboxLock(oldUser)
+	if err != nil {
+		return err
+	}
+	newLock, err := s.mailboxLock(newUser)
+	if err != nil {
+		return err
+	}
+	rootLock.Lock()
+	defer rootLock.Unlock()
+	if oldUser < newUser {
+		oldLock.Lock()
+		defer oldLock.Unlock()
+		newLock.Lock()
+		defer newLock.Unlock()
+	} else {
+		newLock.Lock()
+		defer newLock.Unlock()
+		oldLock.Lock()
+		defer oldLock.Unlock()
+	}
+
+	mailbox, err := s.mailboxPath(root)
+	if err != nil {
+		return err
+	}
+	entries, err := os.ReadDir(mailbox)
+	if err != nil {
+		return fmt.Errorf("list mailboxes: %w", err)
+	}
+	oldPrefix := "." + oldParts[1]
+	newPrefix := "." + newParts[1]
+	var folders []string
+	for _, entry := range entries {
+		if !entry.IsDir() || (entry.Name() != oldPrefix && !strings.HasPrefix(entry.Name(), oldPrefix+".")) {
+			continue
+		}
+		folders = append(folders, entry.Name())
+	}
+	if len(folders) == 0 {
+		return os.ErrNotExist
+	}
+	for _, folder := range folders {
+		suffix := strings.TrimPrefix(folder, oldPrefix)
+		if _, err := os.Stat(filepath.Join(mailbox, newPrefix+suffix)); err == nil {
+			return os.ErrExist
+		} else if !os.IsNotExist(err) {
+			return err
+		}
+	}
+	for _, folder := range folders {
+		suffix := strings.TrimPrefix(folder, oldPrefix)
+		if err := os.Rename(filepath.Join(mailbox, folder), filepath.Join(mailbox, newPrefix+suffix)); err != nil {
+			return fmt.Errorf("rename mailbox: %w", err)
+		}
+	}
+	return nil
+}
+
+// DeleteMailbox removes a Maildir++ folder and any nested folders belonging
+// to the same user. The inbox itself cannot be deleted.
+func (s *Store) DeleteMailbox(user string) error {
+	parts := strings.Split(strings.TrimSpace(user), "/")
+	if len(parts) != 2 || !validMailboxPart(parts[0]) || !validMailboxPart(parts[1]) || parts[1] == "" {
+		return ErrInvalidMailbox
+	}
+	root := strings.TrimSpace(parts[0])
+	rootLock, err := s.mailboxLock(root)
+	if err != nil {
+		return err
+	}
+	mailboxLock, err := s.mailboxLock(user)
+	if err != nil {
+		return err
+	}
+	rootLock.Lock()
+	defer rootLock.Unlock()
+	mailboxLock.Lock()
+	defer mailboxLock.Unlock()
+
+	mailbox, err := s.mailboxPath(root)
+	if err != nil {
+		return err
+	}
+	entries, err := os.ReadDir(mailbox)
+	if err != nil {
+		return err
+	}
+	prefix := "." + parts[1]
+	var folders []string
+	for _, entry := range entries {
+		if !entry.IsDir() || (entry.Name() != prefix && !strings.HasPrefix(entry.Name(), prefix+".")) {
+			continue
+		}
+		folders = append(folders, entry.Name())
+	}
+	if len(folders) == 0 {
+		return os.ErrNotExist
+	}
+	for _, folder := range folders {
+		if err := os.RemoveAll(filepath.Join(mailbox, folder)); err != nil {
+			return fmt.Errorf("delete mailbox: %w", err)
+		}
+	}
+	return nil
+}
+
 // Deliver atomically adds a message to new. data is copied by the operating
 // system before this method returns and may be reused by the caller.
 func (s *Store) Deliver(user string, data []byte) (Message, error) {

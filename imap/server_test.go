@@ -391,6 +391,126 @@ func TestCopyAndUIDExpunge(t *testing.T) {
 	}
 }
 
+func TestCopyToSlashQualifiedFolder(t *testing.T) {
+	store, err := maildir.New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Deliver("kpratt", []byte("Subject: source\r\n\r\nbody\r\n")); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Ensure("kpratt/BitcoinLayer"); err != nil {
+		t.Fatal(err)
+	}
+
+	server := &Server{Store: store}
+	state := &session{rootMailbox: "kpratt", mailbox: "kpratt", selected: true}
+	var responses []string
+	write := func(format string, args ...any) error {
+		responses = append(responses, fmt.Sprintf(format, args...))
+		return nil
+	}
+	server.copy("a001", []string{"1", "INBOX/BitcoinLayer"}, state, write, false)
+	if len(responses) != 1 || responses[0] != "a001 OK COPY completed" {
+		t.Fatalf("copy responses = %#v", responses)
+	}
+	messages, err := store.List("kpratt/BitcoinLayer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(messages) != 1 {
+		t.Fatalf("destination messages = %d, want 1", len(messages))
+	}
+}
+
+func TestNestedInboxFolderMailboxResolution(t *testing.T) {
+	mailbox, ok := resolveMailbox("kpratt", "INBOX/Projects/2026")
+	if !ok || mailbox != "kpratt/Projects.2026" {
+		t.Fatalf("resolved mailbox = %q, %v; want kpratt/Projects.2026, true", mailbox, ok)
+	}
+	if _, ok := resolveMailbox("kpratt", "INBOX/Projects//2026"); ok {
+		t.Fatal("empty nested folder component was accepted")
+	}
+}
+
+func TestListAdvertisesInboxChildFolder(t *testing.T) {
+	store, err := maildir.New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Ensure("kpratt/Cigna"); err != nil {
+		t.Fatal(err)
+	}
+
+	server := &Server{Store: store}
+	state := &session{rootMailbox: "kpratt", authenticated: true}
+	var response bytes.Buffer
+	writer := bufio.NewWriter(&response)
+	server.listMailboxes("a001", []string{"", "*"}, state, writer, "LIST")
+
+	if !strings.Contains(response.String(), `"INBOX.Cigna"`) {
+		t.Fatalf("LIST response = %q, want INBOX.Cigna", response.String())
+	}
+}
+
+func TestStatusQuotesMailboxWithSpaces(t *testing.T) {
+	store, err := maildir.New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := &Server{
+		Hostname: "mail.example.test",
+		Store:    store,
+		Resolve: func(username string) (string, bool) {
+			return "kpratt", strings.EqualFold(username, "kpratt")
+		},
+		Authenticate: func(username, password string) bool {
+			return username == "kpratt" && password == "changeit"
+		},
+		Logger: slog.Default(),
+	}
+	serverConn, clientConn := net.Pipe()
+	defer clientConn.Close()
+	defer serverConn.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go server.handle(ctx, serverConn)
+
+	reader := bufio.NewReader(clientConn)
+	readLine := func() string {
+		t.Helper()
+		line, readErr := reader.ReadString('\n')
+		if readErr != nil {
+			t.Fatal(readErr)
+		}
+		return strings.TrimRight(line, "\r\n")
+	}
+	writeLine := func(line string) {
+		t.Helper()
+		if _, writeErr := fmt.Fprintf(clientConn, "%s\r\n", line); writeErr != nil {
+			t.Fatal(writeErr)
+		}
+	}
+
+	readLine()
+	writeLine("a001 LOGIN kpratt changeit")
+	if result := readLine(); !strings.HasPrefix(result, "a001 OK") {
+		t.Fatalf("login result = %q", result)
+	}
+	writeLine(`a002 CREATE "Folder With Space"`)
+	if result := readLine(); result != "a002 OK CREATE completed" {
+		t.Fatalf("create result = %q", result)
+	}
+	writeLine(`a003 STATUS "Folder With Space" (MESSAGES UNSEEN)`)
+	status := readLine()
+	if status != `* STATUS "Folder With Space" (MESSAGES 0 RECENT 0 UNSEEN 0 UIDNEXT 1 UIDVALIDITY 1)` {
+		t.Fatalf("status result = %q", status)
+	}
+	if result := readLine(); result != "a003 OK STATUS completed" {
+		t.Fatalf("status completion = %q", result)
+	}
+}
+
 func TestCreateListAndSelectFolder(t *testing.T) {
 	store, err := maildir.New(t.TempDir())
 	if err != nil {
@@ -441,12 +561,48 @@ func TestCreateListAndSelectFolder(t *testing.T) {
 	}
 	writeLine("a003 LIST \"\" \"*\"")
 	listLines := []string{readLine(), readLine(), readLine()}
-	if !strings.Contains(strings.Join(listLines, "\n"), `"Projects"`) {
+	if !strings.Contains(strings.Join(listLines, "\n"), `"INBOX.Projects"`) {
 		t.Fatalf("list result = %#v", listLines)
 	}
 	writeLine("a004 SELECT Projects")
 	selectLines := []string{readLine(), readLine(), readLine(), readLine(), readLine()}
 	if result := selectLines[len(selectLines)-1]; result != "a004 OK [READ-WRITE] SELECT completed" {
 		t.Fatalf("select result = %#v", selectLines)
+	}
+	writeLine("a005 CREATE INBOX/Projects/2026")
+	if result := readLine(); result != "a005 OK CREATE completed" {
+		t.Fatalf("nested create result = %q", result)
+	}
+	writeLine("a006 SELECT INBOX/Projects/2026")
+	selectLines = []string{readLine(), readLine(), readLine(), readLine(), readLine()}
+	if result := selectLines[len(selectLines)-1]; result != "a006 OK [READ-WRITE] SELECT completed" {
+		t.Fatalf("nested select result = %#v", selectLines)
+	}
+	writeLine("a007 RENAME INBOX/Projects/2026 INBOX/Archive/2026")
+	if result := readLine(); result != "a007 OK RENAME completed" {
+		t.Fatalf("rename result = %q", result)
+	}
+	writeLine("a008 SELECT INBOX/Archive/2026")
+	selectLines = []string{readLine(), readLine(), readLine(), readLine(), readLine()}
+	if result := selectLines[len(selectLines)-1]; result != "a008 OK [READ-WRITE] SELECT completed" {
+		t.Fatalf("renamed select result = %#v", selectLines)
+	}
+	writeLine("a009 RENAME Archive/2026 INBOX/Archive/2026")
+	if result := readLine(); result != "a009 OK RENAME completed" {
+		t.Fatalf("equivalent rename result = %q", result)
+	}
+	writeLine("a010 DELETE INBOX/Archive")
+	if result := readLine(); result != "a010 OK DELETE completed" {
+		t.Fatalf("delete result = %q", result)
+	}
+	if folders, err := store.ListMailboxes("kpratt"); err != nil || len(folders) != 1 || folders[0] != "Projects" {
+		t.Fatalf("remaining folders after delete = %#v, error = %v", folders, err)
+	}
+	writeLine("a011 DELETE Projects")
+	if result := readLine(); result != "a011 OK DELETE completed" {
+		t.Fatalf("second delete result = %q", result)
+	}
+	if folders, err := store.ListMailboxes("kpratt"); err != nil || len(folders) != 0 {
+		t.Fatalf("remaining folders after second delete = %#v, error = %v", folders, err)
 	}
 }
