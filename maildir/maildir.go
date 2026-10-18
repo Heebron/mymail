@@ -19,13 +19,13 @@ var ErrInvalidMailbox = errors.New("invalid mailbox name")
 
 // Message is the metadata needed by the IMAP server for one Maildir message.
 type Message struct {
+	InternalDate time.Time
+	Flags        map[byte]bool
 	Filename     string
 	Path         string
-	UID          uint32
-	Flags        map[byte]bool
-	Recent       bool
 	Size         int64
-	InternalDate time.Time
+	UID          uint32
+	Recent       bool
 }
 
 // Store manages mailboxes below Root. A Maildir write is committed with one

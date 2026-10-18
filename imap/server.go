@@ -86,11 +86,11 @@ func tlsLabel(config *tls.Config) string {
 }
 
 type session struct {
-	authenticated bool
 	username      string
 	rootMailbox   string
 	mailbox       string
 	exists        int
+	authenticated bool
 	selected      bool
 	readonly      bool
 }
