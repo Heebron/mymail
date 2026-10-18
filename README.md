@@ -12,7 +12,9 @@ service.
   reordered.
 - Concurrent SMTP sessions with `EHLO`, `MAIL`, `RCPT`, `DATA`, `RSET`, `AUTH
   PLAIN`, and `AUTH LOGIN`.
-- Recipient validation prevents delivery to unknown configured users.
+- Recipient validation prevents delivery to unknown users on configured local domains;
+  recipients at other domains are forwarded to that domain's MX host only after SMTP
+  authentication.
 - Receiving-side processor chain for spam filtering, malware scanning, or
   other application-specific policies.
 - IMAP4rev1 access to `INBOX` and user-created folders, including `CAPABILITY`, `NOOP`, `LOGIN`,
@@ -24,9 +26,13 @@ service.
   report `APPENDUID` and `COPYUID` responses with the `UIDPLUS` capability;
   `STARTTLS` is available when TLS is configured.
 - Authenticated users can create, select, rename, and delete Maildir folders
-  with `CREATE`, `LIST`, `SELECT`, `RENAME`, and `DELETE`; nested folders use
-  either `INBOX.Parent.Child` or `INBOX/Parent/Child` notation, and folder
-  messages can also be appended to or copied into the selected user's folders.
+  with `CREATE`, `LIST`, `SELECT`, `RENAME`, and `DELETE`; folders are listed as
+  top-level siblings of `INBOX`, while nested folders use dot notation. The
+  server also accepts `INBOX.Parent.Child` and `INBOX/Parent/Child` aliases, and
+  folder messages can be appended to or copied into the selected user's folders.
+- Structured SMTP logs show connection actions, recipient routing, processing
+  decisions, and local or forwarded delivery outcomes; authentication payloads
+  and message contents are redacted.
 - Structured logs include every IMAP action and session state; authentication
   credentials are redacted.
 - Per-user mailbox resolution and password or SHA-256 password authentication.
@@ -68,8 +74,14 @@ go build -o mymail-send ./cmd/mymail-send
 Use `-server host:port` for another endpoint, `-tls` for an implicit TLS
 listener, and `-insecure-skip-verify` only when testing with a certificate that
 cannot be verified. The client also accepts `-subject` and `-body`; SMTP
-authentication is optional because the development server accepts deliveries
-without authentication.
+authentication is required when relaying to an external domain, while local
+deliveries can still be accepted without authentication.
+
+Recipients whose domain is not configured as local are relayed directly to the
+domain's MX host on port 25 only for authenticated SMTP sessions. MyMail tries MX
+hosts in preference order and returns a temporary SMTP failure if none accepts the
+message. Unauthenticated external recipients are rejected during `RCPT TO`; this
+prevents the server from operating as an open relay.
 
 ## Configuration
 

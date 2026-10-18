@@ -8,6 +8,7 @@ imap_listen: 0.0.0.0:1143
 # Values may use environment variables, for example: ${HOME}/mymail
 maildir_root: /mnt/probox/@email
 hostname: leopard.thepratts.info
+# Authenticated sessions may forward recipients at other domains to their MX host.
 users:
   kpratt@leopard.thepratts.info:
 #    password_sha256: replace-with-lowercase-sha256-hex

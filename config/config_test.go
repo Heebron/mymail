@@ -124,6 +124,21 @@ func TestLoadYAMLValidationError(t *testing.T) {
 	}
 }
 
+func TestIsLocalDomain(t *testing.T) {
+	config := Config{Hostname: "mail.example.test", Users: map[string]User{
+		"alice@example.test": {Password: "secret"},
+		"bob":                {Password: "secret"},
+	}}
+	for _, domain := range []string{"example.test", "mail.example.test", "EXAMPLE.TEST."} {
+		if !config.IsLocalDomain(domain) {
+			t.Fatalf("IsLocalDomain(%q) = false", domain)
+		}
+	}
+	if config.IsLocalDomain("external.test") {
+		t.Fatal("IsLocalDomain(external.test) = true")
+	}
+}
+
 func TestLoadYAMLTLSValidationError(t *testing.T) {
 	tests := []struct {
 		name string

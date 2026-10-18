@@ -126,6 +126,23 @@ func (c *Config) Resolve(username string) (string, bool) {
 	return mailbox, true
 }
 
+func (c *Config) IsLocalDomain(domain string) bool {
+	domain = strings.TrimSuffix(strings.ToLower(strings.TrimSpace(domain)), ".")
+	if domain == "" {
+		return false
+	}
+	if strings.TrimSuffix(strings.ToLower(strings.TrimSpace(c.Hostname)), ".") == domain {
+		return true
+	}
+	for username := range c.Users {
+		_, configuredDomain, ok := strings.Cut(strings.ToLower(strings.TrimSpace(username)), "@")
+		if ok && strings.TrimSuffix(configuredDomain, ".") == domain {
+			return true
+		}
+	}
+	return false
+}
+
 func (c *Config) Authenticate(username, password string) bool {
 	user, ok := c.findUser(username)
 	if !ok {

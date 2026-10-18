@@ -694,7 +694,7 @@ func TestNestedInboxFolderMailboxResolution(t *testing.T) {
 	}
 }
 
-func TestListAdvertisesInboxChildFolder(t *testing.T) {
+func TestListAdvertisesTopLevelFolder(t *testing.T) {
 	store, err := maildir.New(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
@@ -709,8 +709,8 @@ func TestListAdvertisesInboxChildFolder(t *testing.T) {
 	writer := bufio.NewWriter(&response)
 	server.listMailboxes("a001", []string{"", "*"}, state, writer, "LIST")
 
-	if !strings.Contains(response.String(), `"INBOX.Cigna"`) {
-		t.Fatalf("LIST response = %q, want INBOX.Cigna", response.String())
+	if !strings.Contains(response.String(), `"Cigna"`) || strings.Contains(response.String(), `"INBOX.Cigna"`) {
+		t.Fatalf("LIST response = %q, want Cigna beside INBOX", response.String())
 	}
 }
 
@@ -876,7 +876,7 @@ func TestCreateListAndSelectFolder(t *testing.T) {
 	}
 	writeLine("a003 LIST \"\" \"*\"")
 	listLines := []string{readLine(), readLine(), readLine()}
-	if !strings.Contains(strings.Join(listLines, "\n"), `"INBOX.Projects"`) {
+	if !strings.Contains(strings.Join(listLines, "\n"), `"Projects"`) || strings.Contains(strings.Join(listLines, "\n"), `"INBOX.Projects"`) {
 		t.Fatalf("list result = %#v", listLines)
 	}
 	writeLine("a004 SELECT Projects")

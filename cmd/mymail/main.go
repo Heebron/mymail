@@ -75,6 +75,9 @@ func main() {
 		}
 		return "", false
 	}
+	localDomain := func(domain string) bool {
+		return cfg.IsLocalDomain(domain)
+	}
 	authenticate := func(username, password string) bool {
 		if cfg.Authenticate(username, password) {
 			return true
@@ -89,7 +92,7 @@ func main() {
 	newSMTPServer := func(addr string, config *tls.Config) *smtp.Server {
 		return &smtp.Server{
 			Addr: addr, TLSConfig: config, Hostname: cfg.Hostname, Store: store,
-			Processors: processors, Resolve: resolve, Authenticate: authenticate, Logger: logger,
+			Processors: processors, Resolve: resolve, LocalDomain: localDomain, Authenticate: authenticate, Logger: logger,
 		}
 	}
 	newIMAPServer := func(addr string, config *tls.Config) *imap.Server {

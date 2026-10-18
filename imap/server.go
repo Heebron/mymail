@@ -668,7 +668,7 @@ func (s *Server) listMailboxes(tag string, args []string, state *session, writer
 	}
 	names := []string{"INBOX"}
 	for _, folder := range folders {
-		names = append(names, "INBOX."+folder)
+		names = append(names, folder)
 	}
 	pattern := args[len(args)-1]
 	for _, name := range names {
@@ -677,7 +677,7 @@ func (s *Server) listMailboxes(tag string, args []string, state *session, writer
 		}
 		attribute := `\HasNoChildren`
 		for _, folder := range folders {
-			if strings.HasPrefix("INBOX."+folder, name+".") {
+			if strings.HasPrefix(folder, name+".") {
 				attribute = `\HasChildren`
 				break
 			}
