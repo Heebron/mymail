@@ -113,6 +113,16 @@ Alias domains are treated as configured local domains, so unknown recipients
 at those domains are rejected rather than forwarded. Prefer `password_sha256`
 for a configuration file rather than
 plaintext `password` values, and restrict the file to the service account.
+Generate a compatible hash with `mymail-password`; it reads a password from
+standard input by default, or accepts it as an argument for convenience:
+
+```sh
+go build -o mymail-password ./cmd/mymail-password
+printf '%s\n' 'changeit' | ./mymail-password
+```
+
+The command prints the lowercase SHA-256 hexadecimal string to place in
+`password_sha256`.
 Configuration values may contain `${ENV_VARIABLE}` placeholders; variables
 defined in the daemon's environment are substituted when the file is loaded.
 For example:
