@@ -14,6 +14,12 @@ users:
 #    password_sha256: replace-with-lowercase-sha256-hex
     password: changeit
     mailbox: kpratt
+    aliases:
+      - kenpratt@comcast.net
+      - kenpratt01@comcast.net
+      - kpratt@thepratts.info
+      - stashcan@comcast.net
+      - jesterfred@gmail.com
   bob@mail.example.test:
     password: change-me
     mailbox: bob

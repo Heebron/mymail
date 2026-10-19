@@ -15,6 +15,7 @@ import (
 
 	"mymail/config"
 	"mymail/imap"
+	"mymail/logging"
 	"mymail/maildir"
 	"mymail/plugins"
 	"mymail/smtp"
@@ -24,18 +25,23 @@ func main() {
 	configPath := flag.String("config", "/etc/mymail/config.yaml", "path to the YAML configuration")
 	flag.Parse()
 
-	logger := slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	asyncHandler := logging.NewAsyncHandler(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}), logging.DefaultQueueSize)
+	defer asyncHandler.Close()
+	logger := slog.New(asyncHandler)
+	fatal := func(message string, args ...any) {
+		logger.Error(message, args...)
+		asyncHandler.Close()
+		os.Exit(1)
+	}
 	cfg, err := config.Load(*configPath)
 	if err != nil {
-		logger.Error("configuration failed", "error", err)
-		os.Exit(1)
+		fatal("configuration failed", "error", err)
 	}
 	var tlsConfig *tls.Config
 	if cfg.SMTPTLSListen != "" || cfg.IMAPTLSListen != "" {
 		certificate, err := tls.LoadX509KeyPair(cfg.TLSCertFile, cfg.TLSKeyFile)
 		if err != nil {
-			logger.Error("TLS certificate initialization failed", "error", err)
-			os.Exit(1)
+			fatal("TLS certificate initialization failed", "error", err)
 		}
 		tlsConfig = &tls.Config{
 			Certificates: []tls.Certificate{certificate},
@@ -44,8 +50,7 @@ func main() {
 	}
 	store, err := maildir.New(cfg.MaildirRoot)
 	if err != nil {
-		logger.Error("maildir initialization failed", "error", err)
-		os.Exit(1)
+		fatal("maildir initialization failed", "error", err)
 	}
 	mailboxes := make(map[string]bool)
 	for username := range cfg.Users {
@@ -55,8 +60,7 @@ func main() {
 		}
 		if !mailboxes[mailbox] {
 			if err := store.Ensure(mailbox); err != nil {
-				logger.Error("mailbox initialization failed", "user", username, "error", err)
-				os.Exit(1)
+				fatal("mailbox initialization failed", "user", username, "error", err)
 			}
 			mailboxes[mailbox] = true
 		}
@@ -137,8 +141,7 @@ func main() {
 		}
 	}
 	if firstErr != nil {
-		logger.Error("daemon stopped with error", "error", firstErr)
-		os.Exit(1)
+		fatal("daemon stopped with error", "error", firstErr)
 	}
 	logger.Info("daemon stopped")
 }

@@ -1,0 +1,19 @@
+# Send only the Go sources required to build the server image.
+*
+!go.mod
+!go.sum
+!cmd/
+!cmd/mymail/
+!cmd/mymail/**
+!config/
+!config/**
+!imap/
+!imap/**
+!logging/
+!logging/**
+!maildir/
+!maildir/**
+!plugins/
+!plugins/**
+!smtp/
+!smtp/**

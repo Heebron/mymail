@@ -34,7 +34,10 @@ service.
   decisions, and local or forwarded delivery outcomes; authentication payloads
   and message contents are redacted.
 - Structured logs include every IMAP action and session state; authentication
-  credentials are redacted.
+  credentials are redacted. Production logs are queued asynchronously so a
+  slow log destination does not block SMTP or IMAP request handling. The
+  bounded queue drops records under sustained output overload and is drained
+  during graceful shutdown.
 - Per-user mailbox resolution and password or SHA-256 password authentication.
 - YAML configuration with sensible development defaults.
 
@@ -91,7 +94,24 @@ prevents the server from operating as an open relay.
 `config.example.yaml` contains the complete schema. User keys are accepted as
 full addresses (for example `alice@example.test`) or local names. `mailbox`
 is the directory name below `maildir_root`; it must not contain path
-separators. Prefer `password_sha256` for a configuration file rather than
+separators. A user's optional `aliases` list routes additional recipient
+addresses to the same mailbox without creating separate login accounts. For
+example:
+
+```yaml
+users:
+  kpratt@leopard.thepratts.info:
+    password: changeit
+    mailbox: kpratt
+    aliases:
+      - kenpratt@comcast.net
+      - kpratt@thepratts.info
+      - stashcan@comcast.net
+```
+
+Alias domains are treated as configured local domains, so unknown recipients
+at those domains are rejected rather than forwarded. Prefer `password_sha256`
+for a configuration file rather than
 plaintext `password` values, and restrict the file to the service account.
 Configuration values may contain `${ENV_VARIABLE}` placeholders; variables
 defined in the daemon's environment are substituted when the file is loaded.

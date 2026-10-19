@@ -13,9 +13,10 @@ import (
 )
 
 type User struct {
-	Password       string `yaml:"password,omitempty"`
-	PasswordSHA256 string `yaml:"password_sha256,omitempty"`
-	Mailbox        string `yaml:"mailbox,omitempty"`
+	Password       string   `yaml:"password,omitempty"`
+	PasswordSHA256 string   `yaml:"password_sha256,omitempty"`
+	Mailbox        string   `yaml:"mailbox,omitempty"`
+	Aliases        []string `yaml:"aliases,omitempty"`
 }
 
 type Config struct {
@@ -69,6 +70,9 @@ func (c *Config) expandEnvironment() {
 		user.Password = expandEnvironment(user.Password)
 		user.PasswordSHA256 = expandEnvironment(user.PasswordSHA256)
 		user.Mailbox = expandEnvironment(user.Mailbox)
+		for index, alias := range user.Aliases {
+			user.Aliases[index] = expandEnvironment(alias)
+		}
 		c.Users[username] = user
 	}
 }
@@ -100,6 +104,11 @@ func (c *Config) Validate() error {
 	if len(c.Users) == 0 {
 		return errors.New("at least one user is required")
 	}
+	primaryUsers := make(map[string]string, len(c.Users))
+	for username := range c.Users {
+		primaryUsers[strings.ToLower(strings.TrimSpace(username))] = username
+	}
+	aliases := make(map[string]string)
 	for username, user := range c.Users {
 		if strings.TrimSpace(username) == "" || strings.ContainsAny(username, "/\\") {
 			return fmt.Errorf("invalid username %q", username)
@@ -110,20 +119,38 @@ func (c *Config) Validate() error {
 		if user.Mailbox != "" && strings.ContainsAny(user.Mailbox, "/\\") {
 			return fmt.Errorf("user %q has invalid mailbox", username)
 		}
+		for _, alias := range user.Aliases {
+			alias = strings.TrimSpace(alias)
+			if alias == "" || strings.ContainsAny(alias, "/\\") {
+				return fmt.Errorf("user %q has invalid alias %q", username, alias)
+			}
+			key := strings.ToLower(alias)
+			if owner, ok := primaryUsers[key]; ok && owner != username {
+				return fmt.Errorf("alias %q for user %q conflicts with user %q", alias, username, owner)
+			}
+			if owner, ok := aliases[key]; ok && owner != username {
+				return fmt.Errorf("alias %q is assigned to both %q and %q", alias, owner, username)
+			}
+			aliases[key] = username
+		}
 	}
 	return nil
 }
 
 func (c *Config) Resolve(username string) (string, bool) {
 	user, ok := c.findUser(username)
-	if !ok {
-		return "", false
+	if ok {
+		return mailboxFor(username, user), true
 	}
-	mailbox := user.Mailbox
-	if mailbox == "" {
-		mailbox = strings.Split(strings.ToLower(strings.TrimSpace(username)), "@")[0]
+	username = strings.ToLower(strings.TrimSpace(username))
+	for configured, user := range c.Users {
+		for _, alias := range user.Aliases {
+			if strings.ToLower(strings.TrimSpace(alias)) == username {
+				return mailboxFor(configured, user), true
+			}
+		}
 	}
-	return mailbox, true
+	return "", false
 }
 
 func (c *Config) IsLocalDomain(domain string) bool {
@@ -138,6 +165,14 @@ func (c *Config) IsLocalDomain(domain string) bool {
 		_, configuredDomain, ok := strings.Cut(strings.ToLower(strings.TrimSpace(username)), "@")
 		if ok && strings.TrimSuffix(configuredDomain, ".") == domain {
 			return true
+		}
+	}
+	for _, user := range c.Users {
+		for _, alias := range user.Aliases {
+			_, aliasDomain, ok := strings.Cut(strings.ToLower(strings.TrimSpace(alias)), "@")
+			if ok && strings.TrimSuffix(aliasDomain, ".") == domain {
+				return true
+			}
 		}
 	}
 	return false
@@ -175,4 +210,12 @@ func (c *Config) findUser(username string) (User, bool) {
 		}
 	}
 	return match, matches == 1
+}
+
+func mailboxFor(username string, user User) string {
+	mailbox := user.Mailbox
+	if mailbox == "" {
+		mailbox = strings.Split(strings.ToLower(strings.TrimSpace(username)), "@")[0]
+	}
+	return mailbox
 }

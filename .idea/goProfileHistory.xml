@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project version="4">
+  <component name="GoProfileHistory">
+    <profile entry="$USER_HOME$/GoLandProfiles/run-heap_with_gc-2026-10-18-133017-174.pprof">
+      <GoProfileMapEntry>
+        <option name="buildAnchorMillis" value="1792344422401" />
+        <option name="file" value="run-heap_with_gc-2026-10-18-133017-174.pprof" />
+        <option name="ours" value="true" />
+        <option name="profileType" value="HEAP_GC" />
+      </GoProfileMapEntry>
+    </profile>
+    <profile entry="$USER_HOME$/GoLandProfiles/run-cpu-2026-10-18-133336-631.pprof">
+      <GoProfileMapEntry>
+        <option name="buildAnchorMillis" value="1792344422401" />
+        <option name="file" value="run-cpu-2026-10-18-133336-631.pprof" />
+        <option name="ours" value="true" />
+        <option name="profileType" value="CPU" />
+      </GoProfileMapEntry>
+    </profile>
+  </component>
+</project>

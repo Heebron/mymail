@@ -20,6 +20,8 @@ users:
   Alice@Example.Test:
     password: secret
     mailbox: alice
+    aliases:
+      - alias@example.test
 `)
 	if err := os.WriteFile(path, contents, 0600); err != nil {
 		t.Fatal(err)
@@ -53,6 +55,51 @@ users:
 	if mailbox, ok := got.Resolve("alice"); !ok || mailbox != "alice" {
 		t.Fatalf("Resolve() for local username = %q, %t", mailbox, ok)
 	}
+	if mailbox, ok := got.Resolve("alias@example.test"); !ok || mailbox != "alice" {
+		t.Fatalf("Resolve() for alias = %q, %t", mailbox, ok)
+	}
+}
+
+func TestResolveAliasesToSharedMailbox(t *testing.T) {
+	config := Config{
+		Hostname: "leopard.thepratts.info",
+		Users: map[string]User{
+			"kpratt@leopard.thepratts.info": {
+				Password: "changeit",
+				Mailbox:  "kpratt",
+				Aliases:  []string{"kenpratt@comcast.net", "kpratt@thepratts.info", "stashcan@comcast.net"},
+			},
+		},
+	}
+	for _, address := range []string{"kenpratt@comcast.net", "kpratt@thepratts.info", "stashcan@comcast.net"} {
+		if mailbox, ok := config.Resolve(address); !ok || mailbox != "kpratt" {
+			t.Fatalf("Resolve(%q) = %q, %t; want kpratt, true", address, mailbox, ok)
+		}
+	}
+	for _, domain := range []string{"comcast.net", "thepratts.info"} {
+		if !config.IsLocalDomain(domain) {
+			t.Fatalf("IsLocalDomain(%q) = false", domain)
+		}
+	}
+	if config.Authenticate("kenpratt@comcast.net", "changeit") {
+		t.Fatal("alias unexpectedly authenticated as a primary user")
+	}
+}
+
+func TestValidateRejectsDuplicateAliases(t *testing.T) {
+	config := Config{
+		SMTPListen:  "127.0.0.1:2525",
+		IMAPListen:  "127.0.0.1:1143",
+		MaildirRoot: t.TempDir(),
+		Hostname:    "mail.example.test",
+		Users: map[string]User{
+			"alice@example.test": {Password: "secret", Aliases: []string{"shared@example.test"}},
+			"bob@example.test":   {Password: "secret", Aliases: []string{"SHARED@example.test"}},
+		},
+	}
+	if err := config.Validate(); err == nil {
+		t.Fatal("Validate() accepted duplicate aliases")
+	}
 }
 
 func TestLoadYAMLEnvironmentExpansion(t *testing.T) {
@@ -66,6 +113,7 @@ func TestLoadYAMLEnvironmentExpansion(t *testing.T) {
 	t.Setenv("MYMAIL_TLS_KEY", "/etc/mymail/mail.key")
 	t.Setenv("MYMAIL_PASSWORD", "secret-from-environment")
 	t.Setenv("MYMAIL_MAILBOX", "alice-from-environment")
+	t.Setenv("MYMAIL_ALIAS", "alias-from-environment@example.test")
 	path := filepath.Join(t.TempDir(), "config.yaml")
 	contents := []byte(`smtp_listen: ${MYMAIL_SMTP_LISTEN}
 smtp_tls_listen: ${MYMAIL_SMTP_TLS_LISTEN}
@@ -79,6 +127,8 @@ users:
   alice@example.test:
     password: ${MYMAIL_PASSWORD}
     mailbox: ${MYMAIL_MAILBOX}
+    aliases:
+      - ${MYMAIL_ALIAS}
   bob@example.test:
     password: ${MYMAIL_UNDEFINED}
 `)
@@ -107,6 +157,9 @@ users:
 	}
 	if mailbox, ok := got.Resolve("alice@example.test"); !ok || mailbox != "alice-from-environment" {
 		t.Fatalf("Resolve() = %q, %t", mailbox, ok)
+	}
+	if mailbox, ok := got.Resolve("alias-from-environment@example.test"); !ok || mailbox != "alice-from-environment" {
+		t.Fatalf("Resolve() for expanded alias = %q, %t", mailbox, ok)
 	}
 	if got.Users["bob@example.test"].Password != "${MYMAIL_UNDEFINED}" {
 		t.Fatalf("undefined variable = %q", got.Users["bob@example.test"].Password)
