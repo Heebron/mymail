@@ -11,7 +11,9 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"mime"
 	"net"
+	"net/mail"
 	"sort"
 	"strconv"
 	"strings"
@@ -30,17 +32,19 @@ type SMTPDialer func(context.Context, string) (net.Conn, error)
 type Authenticator func(username, password string) bool
 
 type Server struct {
-	Addr         string
-	TLSConfig    *tls.Config
-	Hostname     string
-	Store        *maildir.Store
-	Processors   *plugins.Chain
-	Resolve      Resolver
-	LocalDomain  DomainResolver
-	LookupMX     MXLookup
-	DialSMTP     SMTPDialer
-	Authenticate Authenticator
-	Logger       *slog.Logger
+	Addr            string
+	TLSConfig       *tls.Config
+	StartTLSConfig  *tls.Config
+	RequireSTARTTLS bool
+	Hostname        string
+	Store           *maildir.Store
+	Processors      *plugins.Chain
+	Resolve         Resolver
+	LocalDomain     DomainResolver
+	LookupMX        MXLookup
+	DialSMTP        SMTPDialer
+	Authenticate    Authenticator
+	Logger          *slog.Logger
 }
 
 func (s *Server) ListenAndServe(ctx context.Context) error {
@@ -86,6 +90,13 @@ func (s *Server) logger() *slog.Logger {
 	return slog.Default()
 }
 
+func (s *Server) startTLSConfig() *tls.Config {
+	if s.StartTLSConfig != nil {
+		return s.StartTLSConfig
+	}
+	return s.TLSConfig
+}
+
 func listen(address string, config *tls.Config) (net.Listener, error) {
 	if config != nil {
 		return tls.Listen("tcp", address, config)
@@ -100,6 +111,22 @@ func tlsLabel(config *tls.Config) string {
 	return "plain"
 }
 
+func messageSubject(data []byte) string {
+	message, err := mail.ReadMessage(bytes.NewReader(data))
+	if err != nil {
+		return ""
+	}
+	subject := message.Header.Get("Subject")
+	if subject == "" {
+		return ""
+	}
+	decoded, err := (&mime.WordDecoder{}).DecodeHeader(subject)
+	if err != nil {
+		return subject
+	}
+	return decoded
+}
+
 type transaction struct {
 	started    bool
 	from       string
@@ -112,6 +139,7 @@ func (s *Server) handle(ctx context.Context, conn net.Conn) {
 	defer conn.Close()
 	logger := s.logger()
 	remoteAddr := remoteAddress(conn)
+	tlsActive := isTLSConnection(conn)
 	reader := bufio.NewReaderSize(conn, 64*1024)
 	writer := bufio.NewWriterSize(conn, 16*1024)
 	write := func(format string, args ...any) error {
@@ -153,17 +181,63 @@ func (s *Server) handle(ctx context.Context, conn net.Conn) {
 		switch command {
 		case "EHLO", "HELO":
 			if strings.EqualFold(command, "EHLO") {
-				if _, err := fmt.Fprintf(writer, "250-%s\r\n250-SIZE %d\r\n250-8BITMIME\r\n250-AUTH PLAIN LOGIN\r\n250 PIPELINING\r\n", s.Hostname, maxMessageBytes); err != nil || writer.Flush() != nil {
+				startTLS := s.startTLSConfig() != nil && !tlsActive
+				if _, err := fmt.Fprintf(writer, "250-%s\r\n250-SIZE %d\r\n250-8BITMIME\r\n", s.Hostname, maxMessageBytes); err != nil {
+					return
+				}
+				if startTLS {
+					if _, err := fmt.Fprint(writer, "250-STARTTLS\r\n"); err != nil {
+						return
+					}
+				}
+				auth := !s.RequireSTARTTLS || tlsActive
+				if auth {
+					if _, err := fmt.Fprint(writer, "250-AUTH PLAIN LOGIN\r\n"); err != nil {
+						return
+					}
+				}
+				if _, err := fmt.Fprint(writer, "250 PIPELINING\r\n"); err != nil || writer.Flush() != nil {
 					return
 				}
 			} else if write("250 %s", s.Hostname) != nil {
 				return
 			}
+		case "STARTTLS":
+			if tlsActive {
+				_ = write("503 5.5.1 TLS already active")
+				continue
+			}
+			tlsConfig := s.startTLSConfig()
+			if tlsConfig == nil {
+				_ = write("454 4.7.0 TLS not available")
+				continue
+			}
+			if err := write("220 2.0.0 ready to start TLS"); err != nil {
+				return
+			}
+			tlsConn := tls.Server(conn, tlsConfig)
+			if err := tlsConn.Handshake(); err != nil {
+				return
+			}
+			conn = tlsConn
+			reader = bufio.NewReaderSize(conn, 64*1024)
+			writer = bufio.NewWriterSize(conn, 16*1024)
+			tlsActive = true
+			tx = transaction{}
+			authenticated = false
 		case "AUTH":
+			if s.RequireSTARTTLS && !tlsActive {
+				_ = write("530 5.7.0 Must issue STARTTLS first")
+				continue
+			}
 			if s.authenticate(argument, reader, write, &authenticated, remoteAddr) != nil {
 				return
 			}
 		case "MAIL":
+			if s.RequireSTARTTLS && !tlsActive {
+				_ = write("530 5.7.0 Must issue STARTTLS first")
+				continue
+			}
 			from, ok := parseSMTPPath(argument, "FROM:")
 			if !ok {
 				logger.Warn("SMTP MAIL rejected", "remote_addr", remoteAddr, "reason", "invalid sender")
@@ -226,7 +300,7 @@ func (s *Server) handle(ctx context.Context, conn net.Conn) {
 				tx = transaction{}
 				continue
 			}
-			logger.Info("SMTP message received", "remote_addr", remoteAddr, "sender", tx.from, "recipients", len(tx.recipients), "bytes", len(data))
+			logger.Info("SMTP message received", "remote_addr", remoteAddr, "from", tx.from, "to", tx.recipients, "subject", messageSubject(data), "sender", tx.from, "recipients", len(tx.recipients), "bytes", len(data))
 			message := &plugins.Message{Data: data, From: tx.from, Recipients: append([]string(nil), tx.recipients...), Metadata: map[string]string{"peer": remoteAddr}}
 			result := plugins.Result{Decision: plugins.Accept}
 			if s.Processors != nil {
@@ -548,6 +622,11 @@ func remoteAddress(conn net.Conn) string {
 		return "unknown"
 	}
 	return conn.RemoteAddr().String()
+}
+
+func isTLSConnection(conn net.Conn) bool {
+	_, ok := conn.(*tls.Conn)
+	return ok
 }
 
 func smtpLogArgument(command, argument string) string {

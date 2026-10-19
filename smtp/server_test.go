@@ -105,6 +105,9 @@ func TestSMTPDeliveryReachesResolvedInbox(t *testing.T) {
 		`username=kpratt`,
 		`success=true`,
 		`msg="SMTP message received"`,
+		`from=kenpratt@comcast.net`,
+		`to=[kpratt@leopard.thepratts.info]`,
+		`subject="delivery test"`,
 		`msg="SMTP message processed"`,
 		`decision=accept`,
 		`msg="SMTP local delivery completed"`,
@@ -365,6 +368,105 @@ func TestListenSupportsPlainAndTLS(t *testing.T) {
 			defer listener.Close()
 		})
 	}
+}
+
+func TestSMTPStartTLS(t *testing.T) {
+	store, err := maildir.New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := &Server{
+		Hostname:        "mail.example.test",
+		StartTLSConfig:  testTLSConfig(t),
+		RequireSTARTTLS: true,
+		Store:           store,
+		Resolve:         func(string) (string, bool) { return "", false },
+		Authenticate: func(username, password string) bool {
+			return username == "kpratt" && password == "changeit"
+		},
+		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}
+	serverConn, clientConn := net.Pipe()
+	defer clientConn.Close()
+	go server.handle(context.Background(), serverConn)
+
+	reader := bufio.NewReader(clientConn)
+	readLine := func() string {
+		t.Helper()
+		line, readErr := reader.ReadString('\n')
+		if readErr != nil {
+			t.Fatal(readErr)
+		}
+		return strings.TrimRight(line, "\r\n")
+	}
+	writeLine := func(line string) {
+		t.Helper()
+		if _, writeErr := io.WriteString(clientConn, line+"\r\n"); writeErr != nil {
+			t.Fatal(writeErr)
+		}
+	}
+
+	if greeting := readLine(); !strings.HasPrefix(greeting, "220 ") {
+		t.Fatalf("greeting = %q", greeting)
+	}
+	writeLine("EHLO localhost")
+	capabilities := make([]string, 0, 6)
+	for len(capabilities) == 0 || strings.HasPrefix(capabilities[len(capabilities)-1], "250-") {
+		capabilities = append(capabilities, readLine())
+	}
+	if !containsLine(capabilities, "250-STARTTLS") {
+		t.Fatalf("plaintext capabilities = %#v", capabilities)
+	}
+	if containsLine(capabilities, "250-AUTH PLAIN LOGIN") {
+		t.Fatalf("plaintext capabilities advertise AUTH: %#v", capabilities)
+	}
+	writeLine("AUTH PLAIN " + base64.StdEncoding.EncodeToString([]byte("\x00kpratt\x00changeit")))
+	if response := readLine(); !strings.HasPrefix(response, "530 ") {
+		t.Fatalf("plaintext AUTH response = %q", response)
+	}
+	writeLine("MAIL FROM:<sender@example.test>")
+	if response := readLine(); !strings.HasPrefix(response, "530 ") {
+		t.Fatalf("plaintext MAIL response = %q", response)
+	}
+	writeLine("STARTTLS")
+	if response := readLine(); !strings.HasPrefix(response, "220 ") {
+		t.Fatalf("STARTTLS response = %q", response)
+	}
+
+	tlsClient := tls.Client(clientConn, &tls.Config{InsecureSkipVerify: true, ServerName: "mail.example.test"}) // Test certificate is intentionally self-signed.
+	if err := tlsClient.Handshake(); err != nil {
+		t.Fatal(err)
+	}
+	defer tlsClient.Close()
+	reader = bufio.NewReader(tlsClient)
+	writeTLSLine := func(line string) {
+		t.Helper()
+		if _, writeErr := io.WriteString(tlsClient, line+"\r\n"); writeErr != nil {
+			t.Fatal(writeErr)
+		}
+	}
+	writeTLSLine("EHLO localhost")
+	secureCapabilities := make([]string, 0, 5)
+	for len(secureCapabilities) == 0 || strings.HasPrefix(secureCapabilities[len(secureCapabilities)-1], "250-") {
+		secureCapabilities = append(secureCapabilities, readLine())
+	}
+	if containsLine(secureCapabilities, "250-STARTTLS") {
+		t.Fatalf("TLS capabilities still advertise STARTTLS: %#v", secureCapabilities)
+	}
+	credentials := base64.StdEncoding.EncodeToString([]byte("\x00kpratt\x00changeit"))
+	writeTLSLine("AUTH PLAIN " + credentials)
+	if response := readLine(); !strings.HasPrefix(response, "235 ") {
+		t.Fatalf("TLS AUTH response = %q", response)
+	}
+}
+
+func containsLine(lines []string, want string) bool {
+	for _, line := range lines {
+		if line == want {
+			return true
+		}
+	}
+	return false
 }
 
 func testTLSConfig(t *testing.T) *tls.Config {

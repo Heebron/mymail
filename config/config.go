@@ -20,15 +20,17 @@ type User struct {
 }
 
 type Config struct {
-	SMTPListen    string          `yaml:"smtp_listen"`
-	SMTPTLSListen string          `yaml:"smtp_tls_listen,omitempty"`
-	IMAPListen    string          `yaml:"imap_listen"`
-	IMAPTLSListen string          `yaml:"imap_tls_listen,omitempty"`
-	TLSCertFile   string          `yaml:"tls_cert_file,omitempty"`
-	TLSKeyFile    string          `yaml:"tls_key_file,omitempty"`
-	MaildirRoot   string          `yaml:"maildir_root"`
-	Hostname      string          `yaml:"hostname"`
-	Users         map[string]User `yaml:"users"`
+	SMTPListen          string          `yaml:"smtp_listen"`
+	SMTPTLSListen       string          `yaml:"smtp_tls_listen,omitempty"`
+	SMTPRequireSTARTTLS bool            `yaml:"smtp_require_starttls,omitempty"`
+	IMAPListen          string          `yaml:"imap_listen"`
+	IMAPTLSListen       string          `yaml:"imap_tls_listen,omitempty"`
+	IMAPRequireSTARTTLS bool            `yaml:"imap_require_starttls,omitempty"`
+	TLSCertFile         string          `yaml:"tls_cert_file,omitempty"`
+	TLSKeyFile          string          `yaml:"tls_key_file,omitempty"`
+	MaildirRoot         string          `yaml:"maildir_root"`
+	Hostname            string          `yaml:"hostname"`
+	Users               map[string]User `yaml:"users"`
 }
 
 func Defaults() Config {
@@ -92,11 +94,8 @@ func (c *Config) Validate() error {
 	}
 	hasTLSListener := strings.TrimSpace(c.SMTPTLSListen) != "" || strings.TrimSpace(c.IMAPTLSListen) != ""
 	hasTLSFiles := strings.TrimSpace(c.TLSCertFile) != "" || strings.TrimSpace(c.TLSKeyFile) != ""
-	if hasTLSListener && (strings.TrimSpace(c.TLSCertFile) == "" || strings.TrimSpace(c.TLSKeyFile) == "") {
-		return errors.New("tls_cert_file and tls_key_file are required when a TLS listener is configured")
-	}
-	if hasTLSFiles && !hasTLSListener {
-		return errors.New("a TLS listener is required when TLS certificate files are configured")
+	if (hasTLSListener || hasTLSFiles || c.SMTPRequireSTARTTLS || c.IMAPRequireSTARTTLS) && (strings.TrimSpace(c.TLSCertFile) == "" || strings.TrimSpace(c.TLSKeyFile) == "") {
+		return errors.New("tls_cert_file and tls_key_file must be configured together")
 	}
 	if strings.TrimSpace(c.MaildirRoot) == "" || strings.TrimSpace(c.Hostname) == "" {
 		return errors.New("maildir_root and hostname are required")

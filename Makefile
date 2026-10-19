@@ -3,6 +3,8 @@ UPX ?= upx
 REGISTRY ?= nexus.thepratts.info/pratt-registry
 IMAGE ?= pratt/mymail
 IMAGE_TAG := $(REGISTRY)/$(IMAGE)
+VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || printf 'devel')
+BUILT_ON ?= $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
 
 BINARIES := mymail mymail-send mymail-password
 UPX_FLAGS ?= --best --lzma
@@ -14,13 +16,13 @@ all: build
 build: $(BINARIES)
 
 image:
-	docker build --tag $(IMAGE_TAG) .
+	docker build --build-arg VERSION="$(VERSION)" --build-arg BUILT_ON="$(BUILT_ON)" --tag $(IMAGE_TAG) .
 
 push: image
 	docker push $(IMAGE_TAG)
 
 mymail:
-	GOWORK=off $(GO) build -o $@ ./cmd/mymail
+	GOWORK=off $(GO) build -ldflags "-X main.version=$(VERSION) -X main.builtOn=$(BUILT_ON)" -o $@ ./cmd/mymail
 
 mymail-send:
 	GOWORK=off $(GO) build -o $@ ./cmd/mymail-send

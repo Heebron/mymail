@@ -38,6 +38,82 @@ func TestListenSupportsPlainAndTLS(t *testing.T) {
 	}
 }
 
+func TestIMAPStartTLS(t *testing.T) {
+	store, err := maildir.New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := &Server{
+		Hostname:        "mail.example.test",
+		StartTLSConfig:  testTLSConfig(t),
+		RequireSTARTTLS: true,
+		Store:           store,
+		Resolve:         func(username string) (string, bool) { return "kpratt", username == "kpratt" },
+		Authenticate: func(username, password string) bool {
+			return username == "kpratt" && password == "changeit"
+		},
+		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}
+	serverConn, clientConn := net.Pipe()
+	defer clientConn.Close()
+	go server.handle(context.Background(), serverConn)
+
+	reader := bufio.NewReader(clientConn)
+	readLine := func() string {
+		t.Helper()
+		line, readErr := reader.ReadString('\n')
+		if readErr != nil {
+			t.Fatal(readErr)
+		}
+		return strings.TrimRight(line, "\r\n")
+	}
+	writeLine := func(line string) {
+		t.Helper()
+		if _, writeErr := io.WriteString(clientConn, line+"\r\n"); writeErr != nil {
+			t.Fatal(writeErr)
+		}
+	}
+
+	if greeting := readLine(); !strings.HasPrefix(greeting, "* OK") {
+		t.Fatalf("greeting = %q", greeting)
+	}
+	writeLine("a001 CAPABILITY")
+	capabilities := readLine()
+	if !strings.Contains(capabilities, "STARTTLS") || strings.Contains(capabilities, "AUTH=PLAIN") || !strings.HasPrefix(readLine(), "a001 OK") {
+		t.Fatalf("plaintext capabilities = %q", capabilities)
+	}
+	writeLine("a002 LOGIN kpratt changeit")
+	if response := readLine(); !strings.HasPrefix(response, "a002 NO [PRIVACYREQUIRED]") {
+		t.Fatalf("plaintext LOGIN response = %q", response)
+	}
+	writeLine("a003 STARTTLS")
+	if response := readLine(); response != "a003 OK Begin TLS negotiation now" {
+		t.Fatalf("STARTTLS response = %q", response)
+	}
+
+	tlsClient := tls.Client(clientConn, &tls.Config{InsecureSkipVerify: true, ServerName: "mail.example.test"}) // Test certificate is intentionally self-signed.
+	if err := tlsClient.Handshake(); err != nil {
+		t.Fatal(err)
+	}
+	defer tlsClient.Close()
+	reader = bufio.NewReader(tlsClient)
+	writeTLSLine := func(line string) {
+		t.Helper()
+		if _, writeErr := io.WriteString(tlsClient, line+"\r\n"); writeErr != nil {
+			t.Fatal(writeErr)
+		}
+	}
+	writeTLSLine("a004 CAPABILITY")
+	secureCapabilities := readLine()
+	if strings.Contains(secureCapabilities, "STARTTLS") || !strings.Contains(secureCapabilities, "AUTH=PLAIN") || !strings.HasPrefix(readLine(), "a004 OK") {
+		t.Fatalf("TLS capabilities = %q", secureCapabilities)
+	}
+	writeTLSLine("a005 LOGIN kpratt changeit")
+	if response := readLine(); !strings.HasPrefix(response, "a005 OK") {
+		t.Fatalf("TLS LOGIN response = %q", response)
+	}
+}
+
 func testTLSConfig(t *testing.T) *tls.Config {
 	t.Helper()
 	server := httptest.NewTLSServer(nil)

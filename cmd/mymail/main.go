@@ -6,6 +6,7 @@ import (
 	"crypto/tls"
 	"errors"
 	"flag"
+	"fmt"
 	"log/slog"
 	"net/mail"
 	"os"
@@ -21,13 +22,44 @@ import (
 	"mymail/smtp"
 )
 
+var (
+	version = "devel"
+	builtOn = "unknown"
+)
+
+type configLogUser struct {
+	Mailbox           string   `json:"mailbox,omitempty"`
+	Aliases           []string `json:"aliases,omitempty"`
+	HasPassword       bool     `json:"has_password"`
+	HasPasswordSHA256 bool     `json:"has_password_sha256"`
+}
+
+func configLogUsers(users map[string]config.User) map[string]configLogUser {
+	loggedUsers := make(map[string]configLogUser, len(users))
+	for username, user := range users {
+		loggedUsers[username] = configLogUser{
+			Mailbox:           user.Mailbox,
+			Aliases:           user.Aliases,
+			HasPassword:       user.Password != "",
+			HasPasswordSHA256: user.PasswordSHA256 != "",
+		}
+	}
+	return loggedUsers
+}
+
 func main() {
 	configPath := flag.String("config", "/etc/mymail/config.yaml", "path to the YAML configuration")
+	showVersion := flag.Bool("version", false, "print the MyMail version and exit")
 	flag.Parse()
+	if *showVersion {
+		fmt.Println(version)
+		return
+	}
 
 	asyncHandler := logging.NewAsyncHandler(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}), logging.DefaultQueueSize)
 	defer asyncHandler.Close()
 	logger := slog.New(asyncHandler)
+	logger.Info("daemon started", "version", version, "builtOn", builtOn)
 	fatal := func(message string, args ...any) {
 		logger.Error(message, args...)
 		asyncHandler.Close()
@@ -37,8 +69,26 @@ func main() {
 	if err != nil {
 		fatal("configuration failed", "error", err)
 	}
+	logger.Info("configuration loaded", "path", *configPath)
+	logger.Info("configuration listeners",
+		"smtp_listen", cfg.SMTPListen,
+		"smtp_tls_listen", cfg.SMTPTLSListen,
+		"imap_listen", cfg.IMAPListen,
+		"imap_tls_listen", cfg.IMAPTLSListen,
+	)
+	logger.Info("configuration TLS",
+		"tls_cert_file", cfg.TLSCertFile,
+		"tls_key_file", cfg.TLSKeyFile,
+		"smtp_require_starttls", cfg.SMTPRequireSTARTTLS,
+		"imap_require_starttls", cfg.IMAPRequireSTARTTLS,
+	)
+	logger.Info("configuration storage",
+		"maildir_root", cfg.MaildirRoot,
+		"hostname", cfg.Hostname,
+	)
+	logger.Info("configuration users", "users", configLogUsers(cfg.Users))
 	var tlsConfig *tls.Config
-	if cfg.SMTPTLSListen != "" || cfg.IMAPTLSListen != "" {
+	if cfg.TLSCertFile != "" || cfg.TLSKeyFile != "" {
 		certificate, err := tls.LoadX509KeyPair(cfg.TLSCertFile, cfg.TLSKeyFile)
 		if err != nil {
 			fatal("TLS certificate initialization failed", "error", err)
@@ -95,13 +145,13 @@ func main() {
 	processors := plugins.New()
 	newSMTPServer := func(addr string, config *tls.Config) *smtp.Server {
 		return &smtp.Server{
-			Addr: addr, TLSConfig: config, Hostname: cfg.Hostname, Store: store,
+			Addr: addr, TLSConfig: config, StartTLSConfig: tlsConfig, RequireSTARTTLS: cfg.SMTPRequireSTARTTLS, Hostname: cfg.Hostname, Store: store,
 			Processors: processors, Resolve: resolve, LocalDomain: localDomain, Authenticate: authenticate, Logger: logger,
 		}
 	}
 	newIMAPServer := func(addr string, config *tls.Config) *imap.Server {
 		return &imap.Server{
-			Addr: addr, TLSConfig: config, Hostname: cfg.Hostname, Store: store,
+			Addr: addr, TLSConfig: config, StartTLSConfig: tlsConfig, RequireSTARTTLS: cfg.IMAPRequireSTARTTLS, Hostname: cfg.Hostname, Store: store,
 			Resolve: func(username string) (string, bool) {
 				if mailbox, ok := cfg.Resolve(username); ok {
 					return mailbox, true

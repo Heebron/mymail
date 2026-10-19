@@ -1,10 +1,15 @@
 smtp_listen: 0.0.0.0:2525
 imap_listen: 0.0.0.0:1143
-# Optional implicit TLS listeners can run alongside the non-TLS listeners.
+# Certificate files enable STARTTLS on both listeners above.
+tls_cert_file: /etc/mymail/tls.crt
+tls_key_file: /etc/mymail/tls.key
+# Require STARTTLS before SMTP authentication or message submission.
+smtp_require_starttls: true
+# Require STARTTLS before IMAP authentication.
+imap_require_starttls: true
+# Optional implicit TLS listeners can run alongside the STARTTLS listeners.
 # smtp_tls_listen: 0.0.0.0:465
 # imap_tls_listen: 0.0.0.0:993
-# tls_cert_file: /etc/mymail/tls.crt
-# tls_key_file: /etc/mymail/tls.key
 # Values may use environment variables, for example: ${HOME}/mymail
 maildir_root: /mnt/probox/@email
 hostname: leopard.thepratts.info

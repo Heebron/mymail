@@ -44,11 +44,21 @@ service.
 ## Build and run
 
 ```sh
-go build -o mymail ./cmd/mymail
+make VERSION=v1.0.0 mymail
+./mymail -version
 install -Dm644 deploy/mymail.service /etc/systemd/system/mymail.service
 install -Dm644 config.example.yaml /etc/mymail/config.yaml
 install -Dm755 mymail /usr/local/bin/mymail
 ```
+
+The `-version` flag prints the embedded version and exits without loading the
+configuration. `make` derives `VERSION` from the latest Git tag and revision
+by default; pass `VERSION=...` to set an explicit release version. Builds also
+embed `BUILT_ON` as a UTC RFC3339 timestamp, generated automatically by
+`make` or passed as a Docker build argument. Direct `go build` commands use
+the `devel` and `unknown` fallbacks unless they provide
+`-ldflags "-X main.version=... -X main.builtOn=..."`. The startup log includes
+both values.
 
 Edit `/etc/mymail/config.yaml`, create the service account and Maildir state
 directory, then start the daemon:
@@ -61,9 +71,12 @@ systemctl enable --now mymail
 
 The default development listeners are non-TLS SMTP `:2525` and IMAP `:1143`.
 Use a reverse proxy, firewall rules, or privileged socket activation when
-exposing standard ports. Optional implicit TLS listeners can run simultaneously
-with the non-TLS listeners by setting `smtp_tls_listen` and `imap_tls_listen`,
-along with `tls_cert_file` and `tls_key_file`.
+exposing standard ports. Set `tls_cert_file` and `tls_key_file` to enable
+`STARTTLS` on these listeners. Optional implicit TLS listeners can run
+simultaneously by setting `smtp_tls_listen` and `imap_tls_listen` as needed.
+The checked-in `config.example.yaml` demonstrates STARTTLS with certificate
+paths under `/etc/mymail`; install those files before starting the service, or
+comment the two TLS file entries when running without TLS.
 
 To send a test message through the default SMTP listener, build and run the
 small `mymail-send` client:
@@ -133,10 +146,15 @@ maildir_root: ${HOME}/mymail
 
 Placeholders for variables that are not defined are left unchanged.
 
-`smtp_tls_listen` and `imap_tls_listen` enable implicit TLS endpoints; either
-one requires both certificate files. The non-TLS `smtp_listen` and `imap_listen`
-endpoints remain active at the same time. TLS certificate and key paths may
-also use environment variables.
+`tls_cert_file` and `tls_key_file` enable `STARTTLS` on the non-TLS
+`smtp_listen` and `imap_listen` endpoints. `smtp_tls_listen` and
+`imap_tls_listen` additionally enable implicit TLS endpoints; either endpoint
+requires both certificate files. TLS certificate and key paths may also use
+environment variables. Set `smtp_require_starttls: true` to require SMTP
+clients to negotiate STARTTLS before authenticating or submitting a message,
+and set `imap_require_starttls: true` to require it before IMAP authentication.
+Each setting requires both TLS certificate files. The example configuration
+enables both settings.
 
 ## SMTP processors
 

@@ -10,8 +10,10 @@ func TestLoadYAML(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.yaml")
 	contents := []byte(`smtp_listen: 127.0.0.1:2525
 smtp_tls_listen: 127.0.0.1:2465
+smtp_require_starttls: true
 imap_listen: 127.0.0.1:1143
 imap_tls_listen: 127.0.0.1:1993
+imap_require_starttls: true
 tls_cert_file: /etc/mymail/tls.crt
 tls_key_file: /etc/mymail/tls.key
 maildir_root: /var/lib/mymail
@@ -36,6 +38,9 @@ users:
 	}
 	if got.SMTPTLSListen != "127.0.0.1:2465" || got.IMAPTLSListen != "127.0.0.1:1993" {
 		t.Fatalf("TLS listeners = %#v", got)
+	}
+	if !got.SMTPRequireSTARTTLS || !got.IMAPRequireSTARTTLS {
+		t.Fatalf("required STARTTLS settings = %#v", got)
 	}
 	if got.TLSCertFile != "/etc/mymail/tls.crt" || got.TLSKeyFile != "/etc/mymail/tls.key" {
 		t.Fatalf("TLS certificate files = %#v", got)
@@ -205,10 +210,6 @@ func TestLoadYAMLTLSValidationError(t *testing.T) {
 			name: "missing key",
 			body: "tls_cert_file: /etc/mymail/tls.crt\nimap_tls_listen: 127.0.0.1:1993\n",
 		},
-		{
-			name: "certificate without endpoint",
-			body: "tls_cert_file: /etc/mymail/tls.crt\ntls_key_file: /etc/mymail/tls.key\n",
-		},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -219,6 +220,36 @@ func TestLoadYAMLTLSValidationError(t *testing.T) {
 			}
 			if _, err := Load(path); err == nil {
 				t.Fatal("Load() succeeded for an invalid TLS configuration")
+			}
+		})
+	}
+}
+
+func TestValidateAllowsTLSForSTARTTLSOnly(t *testing.T) {
+	config := Config{
+		SMTPListen:  "127.0.0.1:2525",
+		IMAPListen:  "127.0.0.1:1143",
+		TLSCertFile: "/etc/mymail/tls.crt",
+		TLSKeyFile:  "/etc/mymail/tls.key",
+		MaildirRoot: t.TempDir(),
+		Hostname:    "mail.example.test",
+		Users:       map[string]User{"alice@example.test": {Password: "secret"}},
+	}
+	if err := config.Validate(); err != nil {
+		t.Fatalf("Validate() rejected STARTTLS-only certificate configuration: %v", err)
+	}
+}
+
+func TestValidateRequiresTLSFilesForRequiredSTARTTLS(t *testing.T) {
+	for _, field := range []string{"smtp_require_starttls", "imap_require_starttls"} {
+		t.Run(field, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "config.yaml")
+			contents := []byte("smtp_listen: 127.0.0.1:2525\nimap_listen: 127.0.0.1:1143\nmaildir_root: /tmp/mymail\nhostname: mail.example.test\nusers:\n  alice@example.test:\n    password: secret\n" + field + ": true\n")
+			if err := os.WriteFile(path, contents, 0600); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := Load(path); err == nil {
+				t.Fatal("Load() succeeded without TLS certificate files")
 			}
 		})
 	}

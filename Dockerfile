@@ -6,7 +6,9 @@ COPY go.mod go.sum ./
 RUN GOWORK=off go mod download
 
 COPY . .
-RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags='-s -w' -o /mymail ./cmd/mymail
+ARG VERSION=devel
+ARG BUILT_ON=unknown
+RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w -X main.version=${VERSION} -X main.builtOn=${BUILT_ON}" -o /mymail ./cmd/mymail
 
 FROM backplane/upx:latest AS compressed
 

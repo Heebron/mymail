@@ -31,13 +31,15 @@ var (
 )
 
 type Server struct {
-	Addr         string
-	TLSConfig    *tls.Config
-	Hostname     string
-	Store        *maildir.Store
-	Resolve      Resolver
-	Authenticate Authenticator
-	Logger       *slog.Logger
+	Addr            string
+	TLSConfig       *tls.Config
+	StartTLSConfig  *tls.Config
+	RequireSTARTTLS bool
+	Hostname        string
+	Store           *maildir.Store
+	Resolve         Resolver
+	Authenticate    Authenticator
+	Logger          *slog.Logger
 }
 
 func (s *Server) ListenAndServe(ctx context.Context) error {
@@ -71,6 +73,13 @@ func (s *Server) ListenAndServe(ctx context.Context) error {
 	}
 }
 
+func (s *Server) startTLSConfig() *tls.Config {
+	if s.StartTLSConfig != nil {
+		return s.StartTLSConfig
+	}
+	return s.TLSConfig
+}
+
 func listen(address string, config *tls.Config) (net.Listener, error) {
 	if config != nil {
 		return tls.Listen("tcp", address, config)
@@ -85,6 +94,11 @@ func tlsLabel(config *tls.Config) string {
 	return "plain"
 }
 
+func isTLSConnection(conn net.Conn) bool {
+	_, ok := conn.(*tls.Conn)
+	return ok
+}
+
 type session struct {
 	username      string
 	rootMailbox   string
@@ -97,6 +111,7 @@ type session struct {
 
 func (s *Server) handle(ctx context.Context, conn net.Conn) {
 	defer conn.Close()
+	tlsActive := isTLSConnection(conn)
 	reader := bufio.NewReaderSize(conn, 64*1024)
 	writer := bufio.NewWriterSize(conn, 64*1024)
 	write := func(format string, args ...any) error {
@@ -133,7 +148,7 @@ func (s *Server) handle(ctx context.Context, conn net.Conn) {
 		s.Logger.Info("IMAP action", "remote_addr", remoteAddress(conn), "tag", tag, "command", command, "arguments", imapLogArguments(command, args), "username", state.username, "mailbox", state.mailbox, "authenticated", state.authenticated, "selected", state.selected, "readonly", state.readonly)
 		switch command {
 		case "CAPABILITY":
-			if _, err := fmt.Fprintf(writer, "* CAPABILITY %s\r\n%s OK CAPABILITY completed\r\n", s.capabilities(), tag); err != nil || writer.Flush() != nil {
+			if _, err := fmt.Fprintf(writer, "* CAPABILITY %s\r\n%s OK CAPABILITY completed\r\n", s.capabilitiesForTLS(tlsActive), tag); err != nil || writer.Flush() != nil {
 				return
 			}
 		case "NOOP":
@@ -152,12 +167,20 @@ func (s *Server) handle(ctx context.Context, conn net.Conn) {
 				_ = write("%s BAD LOGIN requires username and password", tag)
 				continue
 			}
-			if !s.authenticateSession(tag, args[0], args[1], &state, write, "LOGIN") {
+			if s.RequireSTARTTLS && !tlsActive {
+				_ = write("%s NO [PRIVACYREQUIRED] TLS required", tag)
+				continue
+			}
+			if !s.authenticateSession(tag, args[0], args[1], &state, write, "LOGIN", tlsActive) {
 				continue
 			}
 		case "AUTHENTICATE":
 			if len(args) < 1 || len(args) > 2 {
 				_ = write("%s BAD AUTHENTICATE requires a mechanism", tag)
+				continue
+			}
+			if s.RequireSTARTTLS && !tlsActive {
+				_ = write("%s NO [PRIVACYREQUIRED] TLS required", tag)
 				continue
 			}
 			initial := ""
@@ -176,7 +199,7 @@ func (s *Server) handle(ctx context.Context, conn net.Conn) {
 				}
 				return
 			}
-			if !s.authenticateSession(tag, username, password, &state, write, "AUTHENTICATE") {
+			if !s.authenticateSession(tag, username, password, &state, write, "AUTHENTICATE", tlsActive) {
 				continue
 			}
 		case "APPEND":
@@ -546,22 +569,28 @@ func (s *Server) handle(ctx context.Context, conn net.Conn) {
 				return
 			}
 		case "STARTTLS":
+			if tlsActive {
+				_ = write("%s BAD STARTTLS already active", tag)
+				continue
+			}
 			if state.authenticated {
 				_ = write("%s BAD STARTTLS not permitted after authentication", tag)
 				continue
 			}
-			if s.TLSConfig == nil {
+			tlsConfig := s.startTLSConfig()
+			if tlsConfig == nil {
 				_ = write("%s NO TLS is not available", tag)
 				continue
 			}
 			if err := write("%s OK Begin TLS negotiation now", tag); err != nil {
 				return
 			}
-			tlsConn := tls.Server(conn, s.TLSConfig)
+			tlsConn := tls.Server(conn, tlsConfig)
 			if err := tlsConn.Handshake(); err != nil {
 				return
 			}
 			conn = tlsConn
+			tlsActive = true
 			reader = bufio.NewReaderSize(conn, 64*1024)
 			writer = bufio.NewWriterSize(conn, 64*1024)
 			state = session{}
@@ -594,7 +623,11 @@ func imapLogArguments(command string, args []string) []string {
 	return logged
 }
 
-func (s *Server) authenticateSession(tag, username, password string, state *session, write func(string, ...any) error, command string) bool {
+func (s *Server) authenticateSession(tag, username, password string, state *session, write func(string, ...any) error, command string, tlsActive bool) bool {
+	if s.RequireSTARTTLS && !tlsActive {
+		_ = write("%s NO [PRIVACYREQUIRED] TLS required", tag)
+		return false
+	}
 	if !s.Authenticate(username, password) {
 		_ = write("%s NO [AUTHENTICATIONFAILED] invalid credentials", tag)
 		return false
@@ -609,16 +642,23 @@ func (s *Server) authenticateSession(tag, username, password string, state *sess
 	state.rootMailbox = mailbox
 	state.mailbox = mailbox
 	if command == "LOGIN" {
-		_ = write("%s OK [CAPABILITY %s] LOGIN completed", tag, s.capabilities())
+		_ = write("%s OK [CAPABILITY %s] LOGIN completed", tag, s.capabilitiesForTLS(tlsActive))
 	} else {
-		_ = write("%s OK [CAPABILITY %s] AUTHENTICATE completed", tag, s.capabilities())
+		_ = write("%s OK [CAPABILITY %s] AUTHENTICATE completed", tag, s.capabilitiesForTLS(tlsActive))
 	}
 	return true
 }
 
 func (s *Server) capabilities() string {
-	capability := "IMAP4rev1 AUTH=PLAIN AUTH=LOGIN NAMESPACE ID IDLE APPEND UIDPLUS"
-	if s.TLSConfig != nil {
+	return s.capabilitiesForTLS(false)
+}
+
+func (s *Server) capabilitiesForTLS(tlsActive bool) string {
+	capability := "IMAP4rev1 NAMESPACE ID IDLE APPEND UIDPLUS"
+	if !s.RequireSTARTTLS || tlsActive {
+		capability += " AUTH=PLAIN AUTH=LOGIN"
+	}
+	if s.startTLSConfig() != nil && !tlsActive {
 		capability += " STARTTLS"
 	}
 	return capability
