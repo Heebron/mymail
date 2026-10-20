@@ -109,6 +109,7 @@ func (c *Config) Validate() error {
 		primaryUsers[strings.ToLower(strings.TrimSpace(username))] = username
 	}
 	aliases := make(map[string]string)
+	mailboxOwners := make(map[string]string, len(c.Users))
 	for username, user := range c.Users {
 		if strings.TrimSpace(username) == "" || strings.ContainsAny(username, "/\\") {
 			return fmt.Errorf("invalid username %q", username)
@@ -119,6 +120,11 @@ func (c *Config) Validate() error {
 		if user.Mailbox != "" && strings.ContainsAny(user.Mailbox, "/\\") {
 			return fmt.Errorf("user %q has invalid mailbox", username)
 		}
+		mailbox := strings.TrimSpace(mailboxFor(username, user))
+		if owner, ok := mailboxOwners[mailbox]; ok {
+			return fmt.Errorf("users %q and %q use the same mailbox %q", owner, username, mailbox)
+		}
+		mailboxOwners[mailbox] = username
 		for _, alias := range user.Aliases {
 			alias = strings.TrimSpace(alias)
 			if alias == "" || strings.ContainsAny(alias, "/\\") {

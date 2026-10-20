@@ -1114,23 +1114,60 @@ func messageLines(data []byte) int {
 }
 
 func fetchEnvelope(data []byte) string {
-	message, err := netmail.ReadMessage(bytes.NewReader(data))
-	if err != nil {
-		return "(NIL NIL NIL NIL NIL NIL NIL NIL NIL NIL)"
-	}
+	header := parseEnvelopeHeaders(data)
 	fields := []string{
-		imapEnvelopeValue(message.Header.Get("Date")),
-		imapEnvelopeValue(message.Header.Get("Subject")),
-		envelopeAddresses(message.Header.Get("From")),
-		envelopeAddresses(message.Header.Get("Sender")),
-		envelopeAddresses(message.Header.Get("Reply-To")),
-		envelopeAddresses(message.Header.Get("To")),
-		envelopeAddresses(message.Header.Get("Cc")),
-		envelopeAddresses(message.Header.Get("Bcc")),
-		imapEnvelopeValue(message.Header.Get("In-Reply-To")),
-		imapEnvelopeValue(message.Header.Get("Message-Id")),
+		imapEnvelopeValue(header.Get("Date")),
+		imapEnvelopeValue(header.Get("Subject")),
+		envelopeAddresses(header.Get("From")),
+		envelopeAddresses(header.Get("Sender")),
+		envelopeAddresses(header.Get("Reply-To")),
+		envelopeAddresses(header.Get("To")),
+		envelopeAddresses(header.Get("Cc")),
+		envelopeAddresses(header.Get("Bcc")),
+		imapEnvelopeValue(header.Get("In-Reply-To")),
+		imapEnvelopeValue(header.Get("Message-Id")),
 	}
 	return "(" + strings.Join(fields, " ") + ")"
+}
+
+func parseEnvelopeHeaders(data []byte) textproto.MIMEHeader {
+	separator, separatorSize := bytesIndex(data, []byte("\r\n\r\n"))
+	if separator < 0 {
+		separator, separatorSize = bytesIndex(data, []byte("\n\n"))
+	}
+	if separator < 0 {
+		separator = len(data)
+		separatorSize = 0
+	}
+	headerData := data[:separator]
+	if separatorSize == 4 {
+		headerData = bytes.ReplaceAll(headerData, []byte("\r\n"), []byte("\n"))
+	}
+	result := make(textproto.MIMEHeader)
+	current := ""
+	for _, line := range bytes.Split(headerData, []byte{'\n'}) {
+		if len(line) > 0 && (line[0] == ' ' || line[0] == '\t') {
+			if current != "" {
+				values := result[current]
+				values[len(values)-1] += " " + strings.TrimSpace(string(line))
+				result[current] = values
+			}
+			continue
+		}
+		colon := bytes.IndexByte(line, ':')
+		if colon <= 0 {
+			current = ""
+			continue
+		}
+		name := textproto.CanonicalMIMEHeaderKey(strings.TrimSpace(string(line[:colon])))
+		if name == "" {
+			current = ""
+			continue
+		}
+		result.Add(name, strings.TrimSpace(string(line[colon+1:])))
+		current = name
+	}
+	return result
 }
 
 func imapEnvelopeValue(value string) string {
@@ -1291,6 +1328,10 @@ func mimePartSectionData(section string, data []byte) []byte {
 			break
 		}
 		children := multipartEntitiesForSection(entity)
+		if len(children) == 0 && index == 0 && partNumber == 1 && !isMultipartMIMEEntity(entity) {
+			index++
+			continue
+		}
 		if partNumber > len(children) {
 			return data
 		}
@@ -1328,6 +1369,11 @@ func multipartEntitiesForSection(entity mimeEntity) []mimeEntity {
 		return nil
 	}
 	return multipartEntities(entity, params["boundary"])
+}
+
+func isMultipartMIMEEntity(entity mimeEntity) bool {
+	mediaType, _, err := mime.ParseMediaType(entity.header.Get("Content-Type"))
+	return err == nil && strings.HasPrefix(strings.ToLower(mediaType), "multipart/")
 }
 
 func mimeEntityHeaderBytes(header textproto.MIMEHeader) []byte {

@@ -117,6 +117,42 @@ func TestValidateRejectsDuplicateAliases(t *testing.T) {
 	}
 }
 
+func TestValidateRejectsDuplicateMailboxes(t *testing.T) {
+	tests := []struct {
+		name  string
+		users map[string]User
+	}{
+		{
+			name: "explicit mailbox",
+			users: map[string]User{
+				"alice@example.test": {Password: "secret", Mailbox: "shared"},
+				"bob@example.test":   {Password: "secret", Mailbox: "shared"},
+			},
+		},
+		{
+			name: "default mailbox",
+			users: map[string]User{
+				"alice@example.test": {Password: "secret"},
+				"alice@example.org":  {Password: "secret"},
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			config := Config{
+				SMTPListen:  "127.0.0.1:2525",
+				IMAPListen:  "127.0.0.1:1143",
+				MaildirRoot: t.TempDir(),
+				Hostname:    "mail.example.test",
+				Users:       test.users,
+			}
+			if err := config.Validate(); err == nil {
+				t.Fatal("Validate() accepted users sharing a mailbox")
+			}
+		})
+	}
+}
+
 func TestLoadYAMLEnvironmentExpansion(t *testing.T) {
 	t.Setenv("MYMAIL_SMTP_LISTEN", "127.0.0.1:3525")
 	t.Setenv("MYMAIL_SMTP_CLEARTEXT_LISTEN", "127.0.0.1:3025")

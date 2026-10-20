@@ -648,6 +648,14 @@ func TestUIDFetchReturnsEvolutionMessageMetadata(t *testing.T) {
 	}
 }
 
+func TestFetchEnvelopeKeepsValidMetadataWithMalformedUnrelatedHeader(t *testing.T) {
+	message := []byte("From: sender@example.test\r\nX-Malformed\r\nSubject: rendered subject\r\n\r\nmessage body\r\n")
+	envelope := fetchEnvelope(message)
+	if !strings.Contains(envelope, `"rendered subject"`) || !strings.Contains(envelope, `NIL NIL "sender" "example.test"`) {
+		t.Fatalf("ENVELOPE = %s; want valid Subject and From values", envelope)
+	}
+}
+
 func TestFetchBodyStructureIsComplete(t *testing.T) {
 	message := []byte("From: sender@example.test\r\nContent-Type: text/plain; charset=UTF-8\r\n\r\nbody\r\n")
 	structure := fetchBodyStructure(message)
@@ -669,6 +677,40 @@ func TestBodySectionDataReturnsMultipartPartBody(t *testing.T) {
 	message := []byte("Content-Type: multipart/alternative; boundary=part\r\n\r\n--part\r\nContent-Type: text/plain\r\n\r\nplain\r\n--part\r\nContent-Type: text/html\r\n\r\n<html>html</html>\r\n--part--\r\n")
 	if got, want := string(bodySectionData("1", message)), "plain"; got != want {
 		t.Fatalf("BODY[1] = %q, want %q", got, want)
+	}
+}
+
+func TestBodySectionDataReturnsPlainBodyForNumericSection(t *testing.T) {
+	message := []byte("From: sender@example.test\r\nContent-Type: text/plain; charset=UTF-8\r\n\r\nplain body\r\n")
+	if got, want := string(bodySectionData("1", message)), "plain body\r\n"; got != want {
+		t.Fatalf("BODY[1] = %q, want %q", got, want)
+	}
+}
+
+func TestFetchNumericBodySectionReturnsPlainBody(t *testing.T) {
+	store, err := maildir.New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	message := []byte("From: sender@example.test\r\nSubject: rendered message\r\nContent-Type: text/plain; charset=UTF-8\r\n\r\nplain body\r\n")
+	if _, err := store.Deliver("alice", message); err != nil {
+		t.Fatal(err)
+	}
+	server := &Server{Store: store}
+	state := &session{authenticated: true, selected: true, mailbox: "alice"}
+	var output bytes.Buffer
+	writer := bufio.NewWriter(&output)
+	server.fetch("a001", []string{"1", "(BODY[1])"}, state, writer, false)
+	if err := writer.Flush(); err != nil {
+		t.Fatal(err)
+	}
+
+	got := output.String()
+	if !strings.Contains(got, "BODY[1] {12}\r\nplain body\r\n") {
+		t.Fatalf("BODY[1] fetch response = %q; want the plain body literal", got)
+	}
+	if strings.Contains(got, "From: sender@example.test") || strings.Contains(got, "Subject: rendered message") {
+		t.Fatalf("BODY[1] fetch response contains message headers: %q", got)
 	}
 }
 
