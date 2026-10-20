@@ -34,7 +34,6 @@ type Authenticator func(username, password string) bool
 
 type Server struct {
 	Addr            string
-	TLSConfig       *tls.Config
 	StartTLSConfig  *tls.Config
 	RequireSTARTTLS bool
 	Hostname        string
@@ -59,11 +58,11 @@ func (s *Server) ListenAndServe(ctx context.Context) error {
 	if s.Logger == nil {
 		s.Logger = slog.Default()
 	}
-	listener, err := listen(s.Addr, s.TLSConfig)
+	listener, err := net.Listen("tcp", s.Addr)
 	if err != nil {
-		return fmt.Errorf("listen %s smtp on %s: %w", tlsLabel(s.TLSConfig), s.Addr, err)
+		return fmt.Errorf("listen SMTP on %s: %w", s.Addr, err)
 	}
-	s.Logger.Info("SMTP server listening", "address", listener.Addr().String(), "tls", s.TLSConfig != nil)
+	s.Logger.Info("SMTP server listening", "address", listener.Addr().String(), "tls", false)
 	go func() {
 		<-ctx.Done()
 		_ = listener.Close()
@@ -93,24 +92,7 @@ func (s *Server) logger() *slog.Logger {
 }
 
 func (s *Server) startTLSConfig() *tls.Config {
-	if s.StartTLSConfig != nil {
-		return s.StartTLSConfig
-	}
-	return s.TLSConfig
-}
-
-func listen(address string, config *tls.Config) (net.Listener, error) {
-	if config != nil {
-		return tls.Listen("tcp", address, config)
-	}
-	return net.Listen("tcp", address)
-}
-
-func tlsLabel(config *tls.Config) string {
-	if config != nil {
-		return "TLS"
-	}
-	return "plain"
+	return s.StartTLSConfig
 }
 
 func messageSubject(data []byte) string {
@@ -145,7 +127,7 @@ func (s *Server) handle(ctx context.Context, conn net.Conn) {
 	if s.AuthLimiter != nil {
 		authConnection = s.AuthLimiter.NewConnection(remoteAddr)
 	}
-	tlsActive := isTLSConnection(conn)
+	tlsActive := false
 	reader := bufio.NewReaderSize(conn, 64*1024)
 	writer := bufio.NewWriterSize(conn, 16*1024)
 	write := func(format string, args ...any) error {
@@ -658,11 +640,6 @@ func remoteAddress(conn net.Conn) string {
 		return "unknown"
 	}
 	return conn.RemoteAddr().String()
-}
-
-func isTLSConnection(conn net.Conn) bool {
-	_, ok := conn.(*tls.Conn)
-	return ok
 }
 
 func smtpLogArgument(command, argument string) string {

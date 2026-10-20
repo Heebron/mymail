@@ -93,7 +93,7 @@ func main() {
 	logger.Info("configuration loaded", "path", *configPath)
 	logger.Info("configuration listeners",
 		"smtp_listen", cfg.SMTPListen,
-		"smtp_tls_listen", cfg.SMTPTLSListen,
+		"smtp_cleartext_listen", cfg.SMTPCleartextListen,
 		"imap_listen", cfg.IMAPListen,
 		"imap_tls_listen", cfg.IMAPTLSListen,
 	)
@@ -167,9 +167,9 @@ func main() {
 	authConfig := auth.DefaultConfig()
 	authConfig.Logger = logger
 	authLimiter := auth.NewLimiter(authConfig)
-	newSMTPServer := func(addr string, config *tls.Config) *smtp.Server {
+	newSMTPServer := func(addr string, startTLSConfig *tls.Config, requireSTARTTLS bool) *smtp.Server {
 		return &smtp.Server{
-			Addr: addr, TLSConfig: config, StartTLSConfig: tlsConfig, RequireSTARTTLS: cfg.SMTPRequireSTARTTLS, Hostname: cfg.Hostname, Store: store,
+			Addr: addr, StartTLSConfig: startTLSConfig, RequireSTARTTLS: requireSTARTTLS, Hostname: cfg.Hostname, Store: store,
 			Processors: processors, Resolve: resolve, LocalDomain: localDomain, Authenticate: authenticate, AuthLimiter: authLimiter, Logger: logger,
 		}
 	}
@@ -188,9 +188,9 @@ func main() {
 			Authenticate: authenticate, AuthLimiter: authLimiter, Logger: logger,
 		}
 	}
-	smtpServers := []*smtp.Server{newSMTPServer(cfg.SMTPListen, nil)}
-	if cfg.SMTPTLSListen != "" {
-		smtpServers = append(smtpServers, newSMTPServer(cfg.SMTPTLSListen, tlsConfig.Clone()))
+	smtpServers := []*smtp.Server{newSMTPServer(cfg.SMTPListen, tlsConfig, cfg.SMTPRequireSTARTTLS)}
+	if cfg.SMTPCleartextListen != "" {
+		smtpServers = append(smtpServers, newSMTPServer(cfg.SMTPCleartextListen, nil, false))
 	}
 	imapServers := []*imap.Server{newIMAPServer(cfg.IMAPListen, nil)}
 	if cfg.IMAPTLSListen != "" {

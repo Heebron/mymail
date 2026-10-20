@@ -52,6 +52,29 @@ func TestDeliverListReadAndFlags(t *testing.T) {
 	}
 }
 
+func TestDeliverNormalizesMessageLineEndings(t *testing.T) {
+	store, err := New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	input := []byte("From: sender@example.test\nSubject: normalized\nbody\n")
+	want := []byte("From: sender@example.test\r\nSubject: normalized\r\n\r\nbody\r\n")
+	message, err := store.Deliver("alice", input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if message.Size != int64(len(want)) {
+		t.Fatalf("stored size = %d, want %d", message.Size, len(want))
+	}
+	got, err := store.Read(message)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, want) {
+		t.Fatalf("stored message = %q, want %q", got, want)
+	}
+}
+
 func TestRejectsMailboxTraversal(t *testing.T) {
 	store, err := New(t.TempDir())
 	if err != nil {

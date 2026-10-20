@@ -21,7 +21,7 @@ type User struct {
 
 type Config struct {
 	SMTPListen          string          `yaml:"smtp_listen"`
-	SMTPTLSListen       string          `yaml:"smtp_tls_listen,omitempty"`
+	SMTPCleartextListen string          `yaml:"smtp_cleartext_listen,omitempty"`
 	SMTPRequireSTARTTLS bool            `yaml:"smtp_require_starttls,omitempty"`
 	IMAPListen          string          `yaml:"imap_listen"`
 	IMAPTLSListen       string          `yaml:"imap_tls_listen,omitempty"`
@@ -35,11 +35,12 @@ type Config struct {
 
 func Defaults() Config {
 	return Config{
-		SMTPListen:  "0.0.0.0:2525",
-		IMAPListen:  "0.0.0.0:1143",
-		MaildirRoot: "/var/lib/mymail",
-		Hostname:    "localhost",
-		Users:       make(map[string]User),
+		SMTPListen:          "0.0.0.0:587",
+		SMTPCleartextListen: "0.0.0.0:25",
+		IMAPListen:          "0.0.0.0:1143",
+		MaildirRoot:         "/var/lib/mymail",
+		Hostname:            "localhost",
+		Users:               make(map[string]User),
 	}
 }
 
@@ -61,7 +62,7 @@ func Load(path string) (Config, error) {
 
 func (c *Config) expandEnvironment() {
 	c.SMTPListen = expandEnvironment(c.SMTPListen)
-	c.SMTPTLSListen = expandEnvironment(c.SMTPTLSListen)
+	c.SMTPCleartextListen = expandEnvironment(c.SMTPCleartextListen)
 	c.IMAPListen = expandEnvironment(c.IMAPListen)
 	c.IMAPTLSListen = expandEnvironment(c.IMAPTLSListen)
 	c.TLSCertFile = expandEnvironment(c.TLSCertFile)
@@ -92,7 +93,7 @@ func (c *Config) Validate() error {
 	if strings.TrimSpace(c.SMTPListen) == "" || strings.TrimSpace(c.IMAPListen) == "" {
 		return errors.New("smtp_listen and imap_listen are required")
 	}
-	hasTLSListener := strings.TrimSpace(c.SMTPTLSListen) != "" || strings.TrimSpace(c.IMAPTLSListen) != ""
+	hasTLSListener := strings.TrimSpace(c.IMAPTLSListen) != ""
 	hasTLSFiles := strings.TrimSpace(c.TLSCertFile) != "" || strings.TrimSpace(c.TLSKeyFile) != ""
 	if (hasTLSListener || hasTLSFiles || c.SMTPRequireSTARTTLS || c.IMAPRequireSTARTTLS) && (strings.TrimSpace(c.TLSCertFile) == "" || strings.TrimSpace(c.TLSKeyFile) == "") {
 		return errors.New("tls_cert_file and tls_key_file must be configured together")

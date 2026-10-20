@@ -276,6 +276,7 @@ func (s *Store) Deliver(user string, data []byte) (Message, error) {
 	if err := s.ensureLocked(user); err != nil {
 		return Message{}, err
 	}
+	data = normalizeMessage(data)
 	mailbox, _ := s.mailboxPath(user)
 	unique, err := uniqueName()
 	if err != nil {
@@ -316,6 +317,72 @@ func uniqueName() (string, error) {
 		return "", fmt.Errorf("generate message id: %w", err)
 	}
 	return fmt.Sprintf("%d.%d.%x", time.Now().UnixNano(), os.Getpid(), random[:]), nil
+}
+
+func normalizeMessage(data []byte) []byte {
+	normalized := make([]byte, 0, len(data)+16)
+	for index := 0; index < len(data); index++ {
+		switch data[index] {
+		case '\r':
+			normalized = append(normalized, '\r', '\n')
+			if index+1 < len(data) && data[index+1] == '\n' {
+				index++
+			}
+		case '\n':
+			normalized = append(normalized, '\r', '\n')
+		default:
+			normalized = append(normalized, data[index])
+		}
+	}
+	return ensureHeaderBodySeparator(normalized)
+}
+
+func ensureHeaderBodySeparator(data []byte) []byte {
+	if strings.Contains(string(data), "\r\n\r\n") {
+		return data
+	}
+	haveHeader := false
+	for start := 0; start < len(data); {
+		end := strings.Index(string(data[start:]), "\r\n")
+		if end < 0 {
+			end = len(data) - start
+		}
+		lineEnd := start + end
+		line := data[start:lineEnd]
+		if isHeaderLine(line, haveHeader) {
+			haveHeader = true
+			if lineEnd == len(data) {
+				return append(data, '\r', '\n', '\r', '\n')
+			}
+			start = lineEnd + 2
+			continue
+		}
+		if haveHeader {
+			result := make([]byte, 0, len(data)+2)
+			result = append(result, data[:start]...)
+			result = append(result, '\r', '\n')
+			result = append(result, data[start:]...)
+			return result
+		}
+		break
+	}
+	return data
+}
+
+func isHeaderLine(line []byte, continuation bool) bool {
+	if len(line) > 0 && (line[0] == ' ' || line[0] == '\t') {
+		return continuation
+	}
+	colon := strings.IndexByte(string(line), ':')
+	if colon < 1 {
+		return false
+	}
+	for _, character := range line[:colon] {
+		if character <= 32 || character >= 127 || character == ':' {
+			return false
+		}
+	}
+	return true
 }
 
 // List returns a stable snapshot of messages in new and cur, sorted by date
@@ -469,7 +536,11 @@ func parseFlags(filename string) map[byte]bool {
 
 // Read opens a message from a snapshot returned by List.
 func (s *Store) Read(message Message) ([]byte, error) {
-	return os.ReadFile(message.Path)
+	data, err := os.ReadFile(message.Path)
+	if err != nil {
+		return nil, err
+	}
+	return normalizeMessage(data), nil
 }
 
 // SetFlags renames a message according to Maildir's :2, flag suffix.

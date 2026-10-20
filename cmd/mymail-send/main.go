@@ -2,7 +2,6 @@
 package main
 
 import (
-	"crypto/tls"
 	"errors"
 	"flag"
 	"fmt"
@@ -17,7 +16,7 @@ import (
 const defaultSubject = "MyMail test message"
 
 func main() {
-	server := flag.String("server", "127.0.0.1:2525", "SMTP server address")
+	server := flag.String("server", "127.0.0.1:587", "SMTP server address")
 	from := flag.String("from", "", "sender address (required)")
 	var to, cc, bcc addressListFlag
 	flag.Var(&to, "to", "recipient address (required; repeatable or comma-separated)")
@@ -27,8 +26,6 @@ func main() {
 	body := flag.String("body", "This is a test message from mymail-send.", "plain-text message body")
 	username := flag.String("username", "", "optional SMTP username")
 	password := flag.String("password", "", "optional SMTP password")
-	implicitTLS := flag.Bool("tls", false, "use an implicit TLS SMTP connection")
-	insecure := flag.Bool("insecure-skip-verify", false, "skip TLS certificate verification")
 	flag.Parse()
 
 	if *from == "" || len(to) == 0 {
@@ -41,14 +38,14 @@ func main() {
 		os.Exit(2)
 	}
 
-	if err := sendMessage(*server, *from, to, cc, bcc, *subject, *body, *username, *password, *implicitTLS, *insecure); err != nil {
+	if err := sendMessage(*server, *from, to, cc, bcc, *subject, *body, *username, *password); err != nil {
 		fmt.Fprintf(os.Stderr, "send message: %v\n", err)
 		os.Exit(1)
 	}
 	fmt.Println("message sent")
 }
 
-func sendMessage(server, from string, to, cc, bcc []string, subject, body, username, password string, implicitTLS, insecure bool) error {
+func sendMessage(server, from string, to, cc, bcc []string, subject, body, username, password string) error {
 	fromAddress, err := parseAddress(from, "from")
 	if err != nil {
 		return err
@@ -75,16 +72,7 @@ func sendMessage(server, from string, to, cc, bcc []string, subject, body, usern
 		return fmt.Errorf("invalid SMTP server %q: %w", server, err)
 	}
 	dialer := &net.Dialer{Timeout: 10 * time.Second}
-	var connection net.Conn
-	if implicitTLS {
-		connection, err = tls.DialWithDialer(dialer, "tcp", server, &tls.Config{
-			MinVersion:         tls.VersionTLS12,
-			ServerName:         host,
-			InsecureSkipVerify: insecure, // Explicitly controlled by the command flag.
-		})
-	} else {
-		connection, err = dialer.Dial("tcp", server)
-	}
+	connection, err := dialer.Dial("tcp", server)
 	if err != nil {
 		return fmt.Errorf("connect to SMTP server: %w", err)
 	}

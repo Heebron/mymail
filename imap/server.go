@@ -12,8 +12,10 @@ import (
 	"io"
 	"log/slog"
 	"mime"
+	"mime/multipart"
 	"net"
 	netmail "net/mail"
+	"net/textproto"
 	"sort"
 	"strconv"
 	"strings"
@@ -898,11 +900,13 @@ func (s *Server) fetch(tag string, args []string, state *session, writer *bufio.
 		message := messages[number-1]
 		bodySections := []fetchBodySection(nil)
 		var data []byte
+		dataLoaded := false
 		if bodyRequested || structureRequested || envelopeRequested {
 			data, readErr := s.Store.Read(message)
 			if readErr != nil {
 				continue
 			}
+			dataLoaded = true
 			if bodyRequested {
 				bodySections = parseFetchBodySections(requested, data)
 			}
@@ -930,7 +934,11 @@ func (s *Server) fetch(tag string, args []string, state *session, writer *bufio.
 			if strings.Contains(requested, "INTERNALDATE") {
 				fmt.Fprintf(writer, " INTERNALDATE %s", quoteIMAPString(message.InternalDate.UTC().Format("02-Jan-2006 15:04:05 -0700")))
 			}
-			fmt.Fprintf(writer, " RFC822.SIZE %d", message.Size)
+			size := message.Size
+			if dataLoaded {
+				size = int64(len(data))
+			}
+			fmt.Fprintf(writer, " RFC822.SIZE %d", size)
 			if structureRequested {
 				fmt.Fprintf(writer, " BODYSTRUCTURE %s", fetchBodyStructure(data))
 			}
@@ -947,7 +955,11 @@ func (s *Server) fetch(tag string, args []string, state *session, writer *bufio.
 			if includeUID {
 				fmt.Fprintf(writer, "UID %d ", message.UID)
 			}
-			fmt.Fprintf(writer, "FLAGS (%s) RFC822.SIZE %d INTERNALDATE \"%s\")\r\n", flags, message.Size, message.InternalDate.UTC().Format("02-Jan-2006 15:04:05 -0700"))
+			size := message.Size
+			if data, readErr := s.Store.Read(message); readErr == nil {
+				size = int64(len(data))
+			}
+			fmt.Fprintf(writer, "FLAGS (%s) RFC822.SIZE %d INTERNALDATE \"%s\")\r\n", flags, size, message.InternalDate.UTC().Format("02-Jan-2006 15:04:05 -0700"))
 		}
 	}
 	fmt.Fprintf(writer, "%s OK FETCH completed\r\n", tag)
@@ -955,11 +967,32 @@ func (s *Server) fetch(tag string, args []string, state *session, writer *bufio.
 }
 
 func fetchBodyStructure(data []byte) string {
+	entity, err := rootMIMEEntity(data)
+	if err != nil {
+		return `("TEXT" "PLAIN" NIL NIL NIL "7BIT" 0 0 NIL NIL NIL NIL)`
+	}
+	return formatMIMEBodyStructure(entity)
+}
+
+type mimeEntity struct {
+	header textproto.MIMEHeader
+	body   []byte
+}
+
+func rootMIMEEntity(data []byte) (mimeEntity, error) {
 	message, err := netmail.ReadMessage(bytes.NewReader(data))
 	if err != nil {
-		return `("TEXT" "PLAIN" NIL NIL NIL "7BIT" 0 0 NIL NIL NIL)`
+		return mimeEntity{}, err
 	}
-	mediaType, params, err := mime.ParseMediaType(message.Header.Get("Content-Type"))
+	body, err := io.ReadAll(message.Body)
+	if err != nil {
+		return mimeEntity{}, err
+	}
+	return mimeEntity{header: textproto.MIMEHeader(message.Header), body: body}, nil
+}
+
+func formatMIMEBodyStructure(entity mimeEntity) string {
+	mediaType, params, err := mime.ParseMediaType(entity.header.Get("Content-Type"))
 	if err != nil || mediaType == "" {
 		mediaType = "text/plain"
 		params = nil
@@ -968,20 +1001,116 @@ func fetchBodyStructure(data []byte) string {
 	if !ok || typeName == "" || subtype == "" {
 		typeName, subtype = "TEXT", "PLAIN"
 	}
-	parameters := "NIL"
-	if charset := params["charset"]; charset != "" {
-		parameters = fmt.Sprintf("(\"CHARSET\" %s)", quoteIMAPString(charset))
+	parameters := formatMIMEParameters(params)
+	if typeName == "MULTIPART" {
+		parts := multipartEntities(entity, params["boundary"])
+		structure := make([]string, 0, len(parts)+5)
+		for _, part := range parts {
+			structure = append(structure, formatMIMEBodyStructure(part))
+		}
+		structure = append(structure, quoteIMAPString(subtype), parameters, formatMIMEDisposition(entity.header.Get("Content-Disposition")), formatMIMELanguage(entity.header.Get("Content-Language")), imapEnvelopeValue(entity.header.Get("Content-Location")))
+		return "(" + strings.Join(structure, " ") + ")"
 	}
-	body, _ := io.ReadAll(message.Body)
-	encoding := strings.ToUpper(strings.TrimSpace(message.Header.Get("Content-Transfer-Encoding")))
+
+	encoding := strings.ToUpper(strings.TrimSpace(entity.header.Get("Content-Transfer-Encoding")))
 	if encoding == "" {
 		encoding = "7BIT"
 	}
-	lines := bytes.Count(body, []byte{'\n'})
-	if typeName != "TEXT" {
-		lines = 0
+	lines := 0
+	if typeName == "TEXT" {
+		lines = messageLines(entity.body)
 	}
-	return fmt.Sprintf("(%s %s %s NIL NIL %s %d %d NIL NIL NIL)", quoteIMAPString(typeName), quoteIMAPString(subtype), parameters, quoteIMAPString(encoding), len(body), lines)
+	return fmt.Sprintf("(%s %s %s %s %s %s %d %d %s %s %s %s)",
+		quoteIMAPString(typeName), quoteIMAPString(subtype), parameters,
+		imapHeaderValue(entity.header.Get("Content-ID")),
+		imapHeaderValue(entity.header.Get("Content-Description")), quoteIMAPString(encoding),
+		len(entity.body), lines, imapHeaderValue(entity.header.Get("Content-MD5")),
+		formatMIMEDisposition(entity.header.Get("Content-Disposition")),
+		formatMIMELanguage(entity.header.Get("Content-Language")), imapEnvelopeValue(entity.header.Get("Content-Location")))
+}
+
+func multipartEntities(entity mimeEntity, boundary string) []mimeEntity {
+	if boundary == "" {
+		return nil
+	}
+	reader := multipart.NewReader(bytes.NewReader(entity.body), boundary)
+	var parts []mimeEntity
+	for {
+		part, err := reader.NextRawPart()
+		if errors.Is(err, io.EOF) {
+			return parts
+		}
+		if err != nil {
+			return parts
+		}
+		body, err := io.ReadAll(part)
+		if err != nil {
+			return parts
+		}
+		parts = append(parts, mimeEntity{header: part.Header, body: body})
+	}
+}
+
+func formatMIMEParameters(params map[string]string) string {
+	if len(params) == 0 {
+		return "NIL"
+	}
+	keys := make([]string, 0, len(params))
+	for key := range params {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	values := make([]string, 0, len(keys)*2)
+	for _, key := range keys {
+		values = append(values, quoteIMAPString(strings.ToUpper(key)), quoteIMAPString(params[key]))
+	}
+	return "(" + strings.Join(values, " ") + ")"
+}
+
+func imapHeaderValue(value string) string {
+	if strings.TrimSpace(value) == "" {
+		return "NIL"
+	}
+	return quoteIMAPString(value)
+}
+
+func formatMIMEDisposition(value string) string {
+	if strings.TrimSpace(value) == "" {
+		return "NIL"
+	}
+	disposition, params, err := mime.ParseMediaType(value)
+	if err != nil || disposition == "" {
+		return "NIL"
+	}
+	return "(" + quoteIMAPString(strings.ToUpper(disposition)) + " " + formatMIMEParameters(params) + ")"
+}
+
+func formatMIMELanguage(value string) string {
+	if strings.TrimSpace(value) == "" {
+		return "NIL"
+	}
+	values := strings.Split(value, ",")
+	quoted := make([]string, 0, len(values))
+	for _, item := range values {
+		if strings.TrimSpace(item) != "" {
+			quoted = append(quoted, quoteIMAPString(strings.TrimSpace(item)))
+		}
+	}
+	if len(quoted) == 0 {
+		return "NIL"
+	}
+	return "(" + strings.Join(quoted, " ") + ")"
+}
+
+func messageLines(data []byte) int {
+	if len(data) == 0 {
+		return 0
+	}
+	lines := bytes.Count(data, []byte{'\n'})
+	if data[len(data)-1] != '\n' {
+		lines++
+	}
+	return lines
 }
 
 func fetchEnvelope(data []byte) string {
@@ -1097,6 +1226,10 @@ func bodySectionMarksSeen(section string) bool {
 }
 
 func bodySectionData(section string, data []byte) []byte {
+	section = strings.TrimSpace(section)
+	if isMIMEPartSection(section) {
+		return mimePartSectionData(section, data)
+	}
 	separator, separatorSize := bytesIndex(data, []byte("\r\n\r\n"))
 	if separator < 0 {
 		separator, separatorSize = bytesIndex(data, []byte("\n\n"))
@@ -1112,9 +1245,9 @@ func bodySectionData(section string, data []byte) []byte {
 		}
 	}
 	headerWithEnding := append(append([]byte(nil), header...), lineEnding...)
-	switch strings.ToUpper(strings.TrimSpace(section)) {
-	case "", "1", "TEXT":
-		if strings.EqualFold(strings.TrimSpace(section), "TEXT") {
+	switch strings.ToUpper(section) {
+	case "", "TEXT":
+		if strings.EqualFold(section, "TEXT") {
 			return text
 		}
 		return data
@@ -1134,6 +1267,82 @@ func bodySectionData(section string, data []byte) []byte {
 		}
 	}
 	return data
+}
+
+func isMIMEPartSection(section string) bool {
+	parts := strings.Split(section, ".")
+	if len(parts) == 0 {
+		return false
+	}
+	_, err := strconv.Atoi(parts[0])
+	return err == nil
+}
+
+func mimePartSectionData(section string, data []byte) []byte {
+	parts := strings.Split(section, ".")
+	entity, err := rootMIMEEntity(data)
+	if err != nil {
+		return data
+	}
+	index := 0
+	for index < len(parts) {
+		partNumber, parseErr := strconv.Atoi(parts[index])
+		if parseErr != nil || partNumber < 1 {
+			break
+		}
+		children := multipartEntitiesForSection(entity)
+		if partNumber > len(children) {
+			return data
+		}
+		entity = children[partNumber-1]
+		index++
+	}
+	if index == 0 {
+		return data
+	}
+	if index == len(parts) || strings.EqualFold(strings.Join(parts[index:], "."), "TEXT") {
+		return entity.body
+	}
+	selector := strings.ToUpper(strings.Join(parts[index:], "."))
+	header := mimeEntityHeaderBytes(entity.header)
+	if selector == "HEADER" || selector == "MIME" {
+		return header
+	}
+	if strings.HasPrefix(selector, "HEADER.FIELDS") {
+		open := strings.IndexByte(selector, '(')
+		closeIdx := strings.LastIndexByte(selector, ')')
+		if open >= 0 && closeIdx > open {
+			fields := make(map[string]bool)
+			for _, field := range strings.Fields(selector[open+1 : closeIdx]) {
+				fields[field] = true
+			}
+			return selectedHeaderFields(header, []byte("\r\n"), fields, strings.HasPrefix(selector, "HEADER.FIELDS.NOT"))
+		}
+	}
+	return entity.body
+}
+
+func multipartEntitiesForSection(entity mimeEntity) []mimeEntity {
+	mediaType, params, err := mime.ParseMediaType(entity.header.Get("Content-Type"))
+	if err != nil || !strings.HasPrefix(strings.ToLower(mediaType), "multipart/") {
+		return nil
+	}
+	return multipartEntities(entity, params["boundary"])
+}
+
+func mimeEntityHeaderBytes(header textproto.MIMEHeader) []byte {
+	keys := make([]string, 0, len(header))
+	for key := range header {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	result := make([]byte, 0)
+	for _, key := range keys {
+		for _, value := range header[key] {
+			result = append(result, key+": "+value+"\r\n"...)
+		}
+	}
+	return result
 }
 
 func bytesIndex(data, separator []byte) (int, int) {

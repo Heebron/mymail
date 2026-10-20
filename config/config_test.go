@@ -9,7 +9,7 @@ import (
 func TestLoadYAML(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.yaml")
 	contents := []byte(`smtp_listen: 127.0.0.1:2525
-smtp_tls_listen: 127.0.0.1:2465
+smtp_cleartext_listen: 127.0.0.1:25
 smtp_require_starttls: true
 imap_listen: 127.0.0.1:1143
 imap_tls_listen: 127.0.0.1:1993
@@ -33,10 +33,10 @@ users:
 	if err != nil {
 		t.Fatalf("Load() error = %v", err)
 	}
-	if got.SMTPListen != "127.0.0.1:2525" || got.IMAPListen != "127.0.0.1:1143" {
+	if got.SMTPListen != "127.0.0.1:2525" || got.SMTPCleartextListen != "127.0.0.1:25" || got.IMAPListen != "127.0.0.1:1143" {
 		t.Fatalf("listeners = %#v", got)
 	}
-	if got.SMTPTLSListen != "127.0.0.1:2465" || got.IMAPTLSListen != "127.0.0.1:1993" {
+	if got.IMAPTLSListen != "127.0.0.1:1993" {
 		t.Fatalf("TLS listeners = %#v", got)
 	}
 	if !got.SMTPRequireSTARTTLS || !got.IMAPRequireSTARTTLS {
@@ -62,6 +62,16 @@ users:
 	}
 	if mailbox, ok := got.Resolve("alias@example.test"); !ok || mailbox != "alice" {
 		t.Fatalf("Resolve() for alias = %q, %t", mailbox, ok)
+	}
+}
+
+func TestDefaultsUseSMTPSubmissionSTARTTLSPort(t *testing.T) {
+	config := Defaults()
+	if config.SMTPListen != "0.0.0.0:587" {
+		t.Fatalf("SMTP default listener = %q, want 0.0.0.0:587", config.SMTPListen)
+	}
+	if config.SMTPCleartextListen != "0.0.0.0:25" {
+		t.Fatalf("SMTP cleartext listener = %q, want 0.0.0.0:25", config.SMTPCleartextListen)
 	}
 }
 
@@ -109,7 +119,7 @@ func TestValidateRejectsDuplicateAliases(t *testing.T) {
 
 func TestLoadYAMLEnvironmentExpansion(t *testing.T) {
 	t.Setenv("MYMAIL_SMTP_LISTEN", "127.0.0.1:3525")
-	t.Setenv("MYMAIL_SMTP_TLS_LISTEN", "127.0.0.1:3465")
+	t.Setenv("MYMAIL_SMTP_CLEARTEXT_LISTEN", "127.0.0.1:3025")
 	t.Setenv("MYMAIL_IMAP_LISTEN", "127.0.0.1:2143")
 	t.Setenv("MYMAIL_IMAP_TLS_LISTEN", "127.0.0.1:2993")
 	t.Setenv("MYMAIL_ROOT", t.TempDir())
@@ -121,7 +131,7 @@ func TestLoadYAMLEnvironmentExpansion(t *testing.T) {
 	t.Setenv("MYMAIL_ALIAS", "alias-from-environment@example.test")
 	path := filepath.Join(t.TempDir(), "config.yaml")
 	contents := []byte(`smtp_listen: ${MYMAIL_SMTP_LISTEN}
-smtp_tls_listen: ${MYMAIL_SMTP_TLS_LISTEN}
+smtp_cleartext_listen: ${MYMAIL_SMTP_CLEARTEXT_LISTEN}
 imap_listen: ${MYMAIL_IMAP_LISTEN}
 imap_tls_listen: ${MYMAIL_IMAP_TLS_LISTEN}
 tls_cert_file: ${MYMAIL_TLS_CERT}
@@ -145,10 +155,10 @@ users:
 	if err != nil {
 		t.Fatalf("Load() error = %v", err)
 	}
-	if got.SMTPListen != "127.0.0.1:3525" || got.IMAPListen != "127.0.0.1:2143" {
+	if got.SMTPListen != "127.0.0.1:3525" || got.SMTPCleartextListen != "127.0.0.1:3025" || got.IMAPListen != "127.0.0.1:2143" {
 		t.Fatalf("listeners = %#v", got)
 	}
-	if got.SMTPTLSListen != "127.0.0.1:3465" || got.IMAPTLSListen != "127.0.0.1:2993" {
+	if got.IMAPTLSListen != "127.0.0.1:2993" {
 		t.Fatalf("TLS listeners = %#v", got)
 	}
 	if got.TLSCertFile != "/etc/mymail/mail.crt" || got.TLSKeyFile != "/etc/mymail/mail.key" {
@@ -204,7 +214,7 @@ func TestLoadYAMLTLSValidationError(t *testing.T) {
 	}{
 		{
 			name: "missing certificate",
-			body: "smtp_tls_listen: 127.0.0.1:2465\n",
+			body: "imap_tls_listen: 127.0.0.1:1993\n",
 		},
 		{
 			name: "missing key",

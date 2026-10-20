@@ -1,14 +1,16 @@
-smtp_listen: 0.0.0.0:2525
+# SMTP submission uses plaintext until the client issues STARTTLS.
+smtp_listen: 0.0.0.0:587
+# Optional cleartext SMTP listener, normally used for port 25 delivery.
+smtp_cleartext_listen: 0.0.0.0:25
 imap_listen: 0.0.0.0:1143
-# Certificate files enable STARTTLS on both listeners above.
+# Certificate files enable STARTTLS on the SMTP submission and IMAP listeners.
 tls_cert_file: /etc/mymail/tls.crt
 tls_key_file: /etc/mymail/tls.key
-# Require STARTTLS before SMTP authentication or message submission.
+# Require STARTTLS before SMTP authentication or message submission on port 587.
 smtp_require_starttls: true
 # Require STARTTLS before IMAP authentication.
 imap_require_starttls: true
-# Optional implicit TLS listeners can run alongside the STARTTLS listeners.
-# smtp_tls_listen: 0.0.0.0:465
+# IMAP may additionally use an implicit TLS listener.
 # imap_tls_listen: 0.0.0.0:993
 # Values may use environment variables, for example: ${HOME}/mymail
 maildir_root: /mnt/probox/@email

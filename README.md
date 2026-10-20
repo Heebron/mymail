@@ -73,11 +73,13 @@ install -d -o mymail -g mymail /var/lib/mymail
 systemctl enable --now mymail
 ```
 
-The default development listeners are non-TLS SMTP `:2525` and IMAP `:1143`.
+The default listeners are cleartext SMTP `:25`, SMTP submission `:587`
+(plaintext until `STARTTLS`), and IMAP `:1143`.
 Use a reverse proxy, firewall rules, or privileged socket activation when
 exposing standard ports. Set `tls_cert_file` and `tls_key_file` to enable
-`STARTTLS` on these listeners. Optional implicit TLS listeners can run
-simultaneously by setting `smtp_tls_listen` and `imap_tls_listen` as needed.
+`STARTTLS` on the SMTP submission and IMAP listeners. The cleartext SMTP
+listener is configured with `smtp_cleartext_listen`; IMAP can additionally
+expose an implicit TLS listener by setting `imap_tls_listen`.
 The checked-in `config.example.yaml` demonstrates STARTTLS with certificate
 paths under `/etc/mymail`; install those files before starting the service, or
 comment the two TLS file entries when running without TLS.
@@ -91,9 +93,8 @@ go build -o mymail-send ./cmd/mymail-send
   -username kpratt -password changeit
 ```
 
-Use `-server host:port` for another endpoint, `-tls` for an implicit TLS
-listener, and `-insecure-skip-verify` only when testing with a certificate that
-cannot be verified. The client also accepts `-subject` and `-body`, plus
+Use `-server host:port` for another endpoint. The client also accepts
+`-subject` and `-body`, plus
 repeatable or comma-separated `-to`, `-cc`, and `-bcc` options. CC addresses
 are included in the message headers; BCC addresses are submitted to SMTP but
 are omitted from the message. SMTP authentication is required when relaying to
@@ -150,12 +151,13 @@ maildir_root: ${HOME}/mymail
 
 Placeholders for variables that are not defined are left unchanged.
 
-`tls_cert_file` and `tls_key_file` enable `STARTTLS` on the non-TLS
-`smtp_listen` and `imap_listen` endpoints. `smtp_tls_listen` and
-`imap_tls_listen` additionally enable implicit TLS endpoints; either endpoint
-requires both certificate files. TLS certificate and key paths may also use
+`tls_cert_file` and `tls_key_file` enable `STARTTLS` on the SMTP
+`smtp_listen` and IMAP `imap_listen` endpoints. `imap_tls_listen` additionally
+enables an IMAP implicit TLS endpoint and requires both certificate files. TLS
+certificate and key paths may also use
 environment variables. Set `smtp_require_starttls: true` to require SMTP
-clients to negotiate STARTTLS before authenticating or submitting a message,
+clients on `smtp_listen` to negotiate STARTTLS before authenticating or
+submitting a message,
 and set `imap_require_starttls: true` to require it before IMAP authentication.
 Each setting requires both TLS certificate files. The example configuration
 enables both settings.

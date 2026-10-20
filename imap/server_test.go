@@ -648,6 +648,30 @@ func TestUIDFetchReturnsEvolutionMessageMetadata(t *testing.T) {
 	}
 }
 
+func TestFetchBodyStructureIsComplete(t *testing.T) {
+	message := []byte("From: sender@example.test\r\nContent-Type: text/plain; charset=UTF-8\r\n\r\nbody\r\n")
+	structure := fetchBodyStructure(message)
+	want := `("TEXT" "PLAIN" ("CHARSET" "UTF-8") NIL NIL "7BIT" 6 1 NIL NIL NIL NIL)`
+	if structure != want {
+		t.Fatalf("BODYSTRUCTURE = %s, want %s", structure, want)
+	}
+}
+
+func TestFetchBodyStructureIncludesMultipartParts(t *testing.T) {
+	message := []byte("Content-Type: multipart/alternative; boundary=part\r\n\r\n--part\r\nContent-Type: text/plain\r\n\r\nplain\r\n--part\r\nContent-Type: text/html\r\n\r\n<html>html</html>\r\n--part--\r\n")
+	structure := fetchBodyStructure(message)
+	if !strings.Contains(structure, `("TEXT" "PLAIN"`) || !strings.Contains(structure, `("TEXT" "HTML"`) {
+		t.Fatalf("multipart BODYSTRUCTURE = %s", structure)
+	}
+}
+
+func TestBodySectionDataReturnsMultipartPartBody(t *testing.T) {
+	message := []byte("Content-Type: multipart/alternative; boundary=part\r\n\r\n--part\r\nContent-Type: text/plain\r\n\r\nplain\r\n--part\r\nContent-Type: text/html\r\n\r\n<html>html</html>\r\n--part--\r\n")
+	if got, want := string(bodySectionData("1", message)), "plain"; got != want {
+		t.Fatalf("BODY[1] = %q, want %q", got, want)
+	}
+}
+
 func TestHeaderFetchKeepsMessageUnread(t *testing.T) {
 	store, err := maildir.New(t.TempDir())
 	if err != nil {
