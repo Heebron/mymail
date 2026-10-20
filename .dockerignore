@@ -5,6 +5,8 @@
 !cmd/
 !cmd/mymail/
 !cmd/mymail/**
+!auth/
+!auth/**
 !config/
 !config/**
 !imap/

@@ -19,6 +19,7 @@ import (
 	"strings"
 	"time"
 
+	"mymail/auth"
 	"mymail/maildir"
 	"mymail/plugins"
 )
@@ -44,6 +45,7 @@ type Server struct {
 	LookupMX        MXLookup
 	DialSMTP        SMTPDialer
 	Authenticate    Authenticator
+	AuthLimiter     *auth.Limiter
 	Logger          *slog.Logger
 }
 
@@ -139,6 +141,10 @@ func (s *Server) handle(ctx context.Context, conn net.Conn) {
 	defer conn.Close()
 	logger := s.logger()
 	remoteAddr := remoteAddress(conn)
+	var authConnection *auth.Connection
+	if s.AuthLimiter != nil {
+		authConnection = s.AuthLimiter.NewConnection(remoteAddr)
+	}
 	tlsActive := isTLSConnection(conn)
 	reader := bufio.NewReaderSize(conn, 64*1024)
 	writer := bufio.NewWriterSize(conn, 16*1024)
@@ -230,7 +236,7 @@ func (s *Server) handle(ctx context.Context, conn net.Conn) {
 				_ = write("530 5.7.0 Must issue STARTTLS first")
 				continue
 			}
-			if s.authenticate(argument, reader, write, &authenticated, remoteAddr) != nil {
+			if s.authenticate(argument, reader, write, &authenticated, remoteAddr, authConnection) != nil {
 				return
 			}
 		case "MAIL":
@@ -547,12 +553,37 @@ func recipientDomain(address string) (string, bool) {
 	return domain, true
 }
 
-func (s *Server) authenticate(argument string, reader *bufio.Reader, write func(string, ...any) error, authenticated *bool, remoteAddr string) error {
+func (s *Server) authenticate(argument string, reader *bufio.Reader, write func(string, ...any) error, authenticated *bool, remoteAddr string, authConnection *auth.Connection) error {
 	mechanism, initial, _ := strings.Cut(argument, " ")
 	mechanism = strings.ToUpper(mechanism)
 	username := ""
 	logResult := func(success bool, reason string) {
 		s.logger().Info("SMTP authentication", "remote_addr", remoteAddr, "mechanism", mechanism, "username", username, "success", success, "reason", reason)
+	}
+	throttleResponse := func(err error) error {
+		if errors.Is(err, auth.ErrConnectionLimit) {
+			logResult(false, "connection authentication limit exceeded")
+			_ = write("421 4.7.0 too many authentication attempts")
+			return err
+		}
+		logResult(false, "authentication backoff")
+		return write("454 4.7.0 authentication temporarily unavailable")
+	}
+	checkThrottle := func() error {
+		if authConnection == nil {
+			return nil
+		}
+		return authConnection.Allow(username)
+	}
+	failAuthentication := func(response, reason string) error {
+		if err := checkThrottle(); err != nil {
+			return throttleResponse(err)
+		}
+		if authConnection != nil {
+			authConnection.Failure(username)
+		}
+		logResult(false, reason)
+		return write(response)
 	}
 	if s.Authenticate == nil {
 		logResult(false, "authentication unavailable")
@@ -573,8 +604,7 @@ func (s *Server) authenticate(argument string, reader *bufio.Reader, write func(
 		decoded, err := base64.StdEncoding.DecodeString(initial)
 		parts := strings.Split(string(decoded), "\x00")
 		if err != nil || len(parts) != 3 {
-			logResult(false, "invalid credentials")
-			return write("535 5.7.8 invalid credentials")
+			return failAuthentication("535 5.7.8 invalid credentials", "invalid credentials")
 		}
 		username, password = parts[1], parts[2]
 	} else if mechanism == "LOGIN" {
@@ -587,8 +617,7 @@ func (s *Server) authenticate(argument string, reader *bufio.Reader, write func(
 		}
 		usernameBytes, err := base64.StdEncoding.DecodeString(strings.TrimSpace(line))
 		if err != nil {
-			logResult(false, "invalid credentials")
-			return write("535 5.7.8 invalid credentials")
+			return failAuthentication("535 5.7.8 invalid credentials", "invalid credentials")
 		}
 		username = string(usernameBytes)
 		if err := write("334 UGFzc3dvcmQ6"); err != nil {
@@ -600,17 +629,24 @@ func (s *Server) authenticate(argument string, reader *bufio.Reader, write func(
 		}
 		passwordBytes, err := base64.StdEncoding.DecodeString(strings.TrimSpace(line))
 		if err != nil {
-			logResult(false, "invalid credentials")
-			return write("535 5.7.8 invalid credentials")
+			return failAuthentication("535 5.7.8 invalid credentials", "invalid credentials")
 		}
 		password = string(passwordBytes)
 	} else {
-		logResult(false, "unsupported authentication mechanism")
-		return write("504 5.5.4 unsupported authentication mechanism")
+		return failAuthentication("504 5.5.4 unsupported authentication mechanism", "unsupported authentication mechanism")
+	}
+	if err := checkThrottle(); err != nil {
+		return throttleResponse(err)
 	}
 	if !s.Authenticate(username, password) {
+		if authConnection != nil {
+			authConnection.Failure(username)
+		}
 		logResult(false, "invalid credentials")
 		return write("535 5.7.8 authentication credentials invalid")
+	}
+	if authConnection != nil {
+		authConnection.Success(username)
 	}
 	*authenticated = true
 	logResult(true, "authentication successful")

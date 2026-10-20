@@ -1,7 +1,9 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
+	"log/slog"
 	"strings"
 	"testing"
 
@@ -33,5 +35,42 @@ func TestConfigLogUsersRedactsPasswords(t *testing.T) {
 	}
 	if !strings.Contains(output, `"has_password":true`) || !strings.Contains(output, `"has_password_sha256":true`) {
 		t.Fatalf("config log output omits credential presence: %s", output)
+	}
+}
+
+func TestLogConfigUsersWritesOneRecordPerUser(t *testing.T) {
+	var output bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&output, nil))
+	logConfigUsers(logger, map[string]config.User{
+		"bob@example.test": {
+			Password: "bob-secret",
+			Mailbox:  "bob",
+		},
+		"alice@example.test": {
+			PasswordSHA256: "alice-secret",
+			Mailbox:        "alice",
+		},
+	})
+
+	lines := strings.Split(strings.TrimSpace(output.String()), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("configuration log record count = %d, want 2: %s", len(lines), output.String())
+	}
+	for index, wantUsername := range []string{"alice@example.test", "bob@example.test"} {
+		var record map[string]any
+		if err := json.Unmarshal([]byte(lines[index]), &record); err != nil {
+			t.Fatalf("decode configuration log record %d: %v", index, err)
+		}
+		if record["msg"] != "configuration user" {
+			t.Errorf("record %d message = %v, want configuration user", index, record["msg"])
+		}
+		if record["username"] != wantUsername {
+			t.Errorf("record %d username = %v, want %s", index, record["username"], wantUsername)
+		}
+	}
+	for _, secret := range []string{"bob-secret", "alice-secret"} {
+		if strings.Contains(output.String(), secret) {
+			t.Errorf("configuration log contains password %q: %s", secret, output.String())
+		}
 	}
 }

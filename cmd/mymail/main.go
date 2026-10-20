@@ -11,9 +11,11 @@ import (
 	"net/mail"
 	"os"
 	"os/signal"
+	"sort"
 	"strings"
 	"syscall"
 
+	"mymail/auth"
 	"mymail/config"
 	"mymail/imap"
 	"mymail/logging"
@@ -45,6 +47,25 @@ func configLogUsers(users map[string]config.User) map[string]configLogUser {
 		}
 	}
 	return loggedUsers
+}
+
+func logConfigUsers(logger *slog.Logger, users map[string]config.User) {
+	loggedUsers := configLogUsers(users)
+	usernames := make([]string, 0, len(loggedUsers))
+	for username := range loggedUsers {
+		usernames = append(usernames, username)
+	}
+	sort.Strings(usernames)
+	for _, username := range usernames {
+		user := loggedUsers[username]
+		logger.Info("configuration user",
+			"username", username,
+			"mailbox", user.Mailbox,
+			"aliases", user.Aliases,
+			"has_password", user.HasPassword,
+			"has_password_sha256", user.HasPasswordSHA256,
+		)
+	}
 }
 
 func main() {
@@ -86,7 +107,7 @@ func main() {
 		"maildir_root", cfg.MaildirRoot,
 		"hostname", cfg.Hostname,
 	)
-	logger.Info("configuration users", "users", configLogUsers(cfg.Users))
+	logConfigUsers(logger, cfg.Users)
 	var tlsConfig *tls.Config
 	if cfg.TLSCertFile != "" || cfg.TLSKeyFile != "" {
 		certificate, err := tls.LoadX509KeyPair(cfg.TLSCertFile, cfg.TLSKeyFile)
@@ -143,10 +164,13 @@ func main() {
 	}
 
 	processors := plugins.New()
+	authConfig := auth.DefaultConfig()
+	authConfig.Logger = logger
+	authLimiter := auth.NewLimiter(authConfig)
 	newSMTPServer := func(addr string, config *tls.Config) *smtp.Server {
 		return &smtp.Server{
 			Addr: addr, TLSConfig: config, StartTLSConfig: tlsConfig, RequireSTARTTLS: cfg.SMTPRequireSTARTTLS, Hostname: cfg.Hostname, Store: store,
-			Processors: processors, Resolve: resolve, LocalDomain: localDomain, Authenticate: authenticate, Logger: logger,
+			Processors: processors, Resolve: resolve, LocalDomain: localDomain, Authenticate: authenticate, AuthLimiter: authLimiter, Logger: logger,
 		}
 	}
 	newIMAPServer := func(addr string, config *tls.Config) *imap.Server {
@@ -161,7 +185,7 @@ func main() {
 				}
 				return "", false
 			},
-			Authenticate: authenticate, Logger: logger,
+			Authenticate: authenticate, AuthLimiter: authLimiter, Logger: logger,
 		}
 	}
 	smtpServers := []*smtp.Server{newSMTPServer(cfg.SMTPListen, nil)}

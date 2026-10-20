@@ -19,6 +19,7 @@ import (
 	"strings"
 	"time"
 
+	"mymail/auth"
 	"mymail/maildir"
 )
 
@@ -39,6 +40,7 @@ type Server struct {
 	Store           *maildir.Store
 	Resolve         Resolver
 	Authenticate    Authenticator
+	AuthLimiter     *auth.Limiter
 	Logger          *slog.Logger
 }
 
@@ -112,6 +114,10 @@ type session struct {
 func (s *Server) handle(ctx context.Context, conn net.Conn) {
 	defer conn.Close()
 	tlsActive := isTLSConnection(conn)
+	var authConnection *auth.Connection
+	if s.AuthLimiter != nil {
+		authConnection = s.AuthLimiter.NewConnection(remoteAddress(conn))
+	}
 	reader := bufio.NewReaderSize(conn, 64*1024)
 	writer := bufio.NewWriterSize(conn, 64*1024)
 	write := func(format string, args ...any) error {
@@ -171,7 +177,11 @@ func (s *Server) handle(ctx context.Context, conn net.Conn) {
 				_ = write("%s NO [PRIVACYREQUIRED] TLS required", tag)
 				continue
 			}
-			if !s.authenticateSession(tag, args[0], args[1], &state, write, "LOGIN", tlsActive) {
+			authenticated, authErr := s.authenticateSession(tag, args[0], args[1], &state, write, "LOGIN", tlsActive, authConnection)
+			if authErr != nil {
+				return
+			}
+			if !authenticated {
 				continue
 			}
 		case "AUTHENTICATE":
@@ -190,6 +200,17 @@ func (s *Server) handle(ctx context.Context, conn net.Conn) {
 			username, password, authErr := readAuthentication(args[0], initial, reader, write)
 			if authErr != nil {
 				if errors.Is(authErr, errAuthenticationInvalid) || errors.Is(authErr, errAuthenticationCancelled) {
+					if authConnection != nil {
+						if throttleErr := authConnection.Allow(""); throttleErr != nil {
+							if errors.Is(throttleErr, auth.ErrConnectionLimit) {
+								_ = write("%s BYE [AUTHENTICATIONFAILED] too many authentication attempts", tag)
+								return
+							}
+							_ = write("%s NO [UNAVAILABLE] authentication temporarily unavailable", tag)
+							continue
+						}
+						authConnection.Failure("")
+					}
 					message := "invalid credentials"
 					if errors.Is(authErr, errAuthenticationCancelled) {
 						message = "authentication cancelled"
@@ -199,7 +220,11 @@ func (s *Server) handle(ctx context.Context, conn net.Conn) {
 				}
 				return
 			}
-			if !s.authenticateSession(tag, username, password, &state, write, "AUTHENTICATE", tlsActive) {
+			authenticated, authErr := s.authenticateSession(tag, username, password, &state, write, "AUTHENTICATE", tlsActive, authConnection)
+			if authErr != nil {
+				return
+			}
+			if !authenticated {
 				continue
 			}
 		case "APPEND":
@@ -623,19 +648,35 @@ func imapLogArguments(command string, args []string) []string {
 	return logged
 }
 
-func (s *Server) authenticateSession(tag, username, password string, state *session, write func(string, ...any) error, command string, tlsActive bool) bool {
+func (s *Server) authenticateSession(tag, username, password string, state *session, write func(string, ...any) error, command string, tlsActive bool, authConnection *auth.Connection) (bool, error) {
 	if s.RequireSTARTTLS && !tlsActive {
 		_ = write("%s NO [PRIVACYREQUIRED] TLS required", tag)
-		return false
+		return false, nil
+	}
+	if authConnection != nil {
+		if err := authConnection.Allow(username); err != nil {
+			if errors.Is(err, auth.ErrConnectionLimit) {
+				_ = write("%s BYE [AUTHENTICATIONFAILED] too many authentication attempts", tag)
+				return false, err
+			}
+			_ = write("%s NO [UNAVAILABLE] authentication temporarily unavailable", tag)
+			return false, nil
+		}
 	}
 	if !s.Authenticate(username, password) {
+		if authConnection != nil {
+			authConnection.Failure(username)
+		}
 		_ = write("%s NO [AUTHENTICATIONFAILED] invalid credentials", tag)
-		return false
+		return false, nil
 	}
 	mailbox, ok := s.Resolve(username)
 	if !ok || s.Store.Ensure(mailbox) != nil {
 		_ = write("%s NO mailbox unavailable", tag)
-		return false
+		return false, nil
+	}
+	if authConnection != nil {
+		authConnection.Success(username)
 	}
 	state.authenticated = true
 	state.username = username
@@ -646,7 +687,7 @@ func (s *Server) authenticateSession(tag, username, password string, state *sess
 	} else {
 		_ = write("%s OK [CAPABILITY %s] AUTHENTICATE completed", tag, s.capabilitiesForTLS(tlsActive))
 	}
-	return true
+	return true, nil
 }
 
 func (s *Server) capabilities() string {

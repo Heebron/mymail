@@ -38,6 +38,10 @@ service.
   slow log destination does not block SMTP or IMAP request handling. The
   bounded queue drops records under sustained output overload and is drained
   during graceful shutdown.
+- Shared SMTP and IMAP authentication throttling limits each connection to five
+  attempts, applies exponential backoff after failures, and tracks failures by
+  source IP and account. A successful login clears the associated IP and
+  account backoff state.
 - Per-user mailbox resolution and password or SHA-256 password authentication.
 - YAML configuration with sensible development defaults.
 
@@ -155,6 +159,16 @@ clients to negotiate STARTTLS before authenticating or submitting a message,
 and set `imap_require_starttls: true` to require it before IMAP authentication.
 Each setting requires both TLS certificate files. The example configuration
 enables both settings.
+
+Authentication throttling is enabled by default and is shared by all SMTP and
+IMAP listeners. Each connection may make five authentication attempts; a
+source IP is limited to 20 failures and an account to 10 failures within a
+15-minute window. Failed attempts begin with a one-second backoff that grows
+exponentially to one minute. SMTP reports an exhausted connection limit and
+closes the connection; IMAP reports a `BYE` response. These limits are built-in
+defaults rather than YAML settings. Each allow, backoff, connection-limit,
+failure, and reset decision is emitted as a structured authentication throttle
+log without password data.
 
 ## SMTP processors
 
