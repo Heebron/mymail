@@ -763,11 +763,28 @@ func TestSequenceFetchNotifiesExternalExpungeBeforeRemapping(t *testing.T) {
 	var output bytes.Buffer
 	server.fetch("a001", []string{"1", "(UID)"}, state, bufio.NewWriter(&output), false)
 	got := output.String()
-	if !strings.Contains(got, "* 1 EXPUNGE") {
-		t.Fatalf("sequence refresh = %q; want external expunge notification", got)
+	if strings.Contains(got, "EXPUNGE") {
+		t.Fatalf("sequence fetch = %q; did not want EXPUNGE while sequence is referenced", got)
 	}
-	if !strings.Contains(got, fmt.Sprintf("* 1 FETCH (UID %d", messages[1].UID)) {
-		t.Fatalf("sequence fetch = %q; want remaining UID %d", got, messages[1].UID)
+	if strings.Contains(got, "* 1 FETCH") {
+		t.Fatalf("sequence fetch = %q; did not want a remapped FETCH", got)
+	}
+	current, err := store.List("alice")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var changes []string
+	if _, err, _ := syncSequenceAndNotify(state, current, func(format string, args ...any) error {
+		changes = append(changes, fmt.Sprintf(format, args...))
+		return nil
+	}, true); err != nil {
+		t.Fatal(err)
+	}
+	if len(changes) != 1 || changes[0] != "* 1 EXPUNGE" {
+		t.Fatalf("deferred sequence refresh = %#v; want one EXPUNGE", changes)
+	}
+	if len(state.sequence) != 1 || state.sequence[0] != messages[1].UID {
+		t.Fatalf("sequence after deferred refresh = %#v; want UID %d", state.sequence, messages[1].UID)
 	}
 }
 
@@ -1051,6 +1068,30 @@ func TestCopyAndUIDExpunge(t *testing.T) {
 	}
 	if len(remaining) != 2 {
 		t.Fatalf("remaining messages = %d, want 2", len(remaining))
+	}
+}
+
+func TestExpungeSequenceTracksAnnouncedRemoval(t *testing.T) {
+	state := &session{
+		selected:      true,
+		sequence:      []uint32{101, 202},
+		sequenceReady: true,
+		exists:        2,
+	}
+	removeSequenceUID(state, 101)
+	var responses []string
+	_, err, _ := syncSequenceAndNotify(state, nil, func(format string, args ...any) error {
+		responses = append(responses, fmt.Sprintf(format, args...))
+		return nil
+	}, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(responses) != 1 || responses[0] != "* 1 EXPUNGE" {
+		t.Fatalf("late removal responses = %#v; want one EXPUNGE", responses)
+	}
+	if state.exists != 0 || len(state.sequence) != 0 {
+		t.Fatalf("sequence after late removal = %#v, exists=%d", state.sequence, state.exists)
 	}
 }
 

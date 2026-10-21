@@ -193,6 +193,58 @@ func syncSequence(state *session, messages []maildir.Message) []maildir.Message 
 	return ordered
 }
 
+func sequenceMessages(state *session, messages []maildir.Message) ([]maildir.Message, bool) {
+	if !state.sequenceReady {
+		messages = syncSequence(state, messages)
+		state.exists = len(messages)
+		return messages, false
+	}
+	byUID := make(map[uint32]maildir.Message, len(messages))
+	for _, message := range messages {
+		byUID[message.UID] = message
+	}
+	for _, uid := range state.sequence {
+		if _, ok := byUID[uid]; !ok {
+			ordered := make([]maildir.Message, len(state.sequence))
+			for index, sequenceUID := range state.sequence {
+				ordered[index] = byUID[sequenceUID]
+			}
+			return ordered, false
+		}
+	}
+	added := len(messages) > len(state.sequence)
+	if added {
+		known := make(map[uint32]bool, len(state.sequence))
+		for _, uid := range state.sequence {
+			known[uid] = true
+		}
+		for _, message := range messages {
+			if !known[message.UID] {
+				state.sequence = append(state.sequence, message.UID)
+				known[message.UID] = true
+			}
+		}
+		state.exists = len(state.sequence)
+	}
+	ordered := make([]maildir.Message, len(state.sequence))
+	for index, uid := range state.sequence {
+		ordered[index] = byUID[uid]
+	}
+	return ordered, added
+}
+
+func removeSequenceUID(state *session, uid uint32) {
+	for index, sequenceUID := range state.sequence {
+		if sequenceUID != uid {
+			continue
+		}
+		copy(state.sequence[index:], state.sequence[index+1:])
+		state.sequence = state.sequence[:len(state.sequence)-1]
+		state.exists = len(state.sequence)
+		return
+	}
+}
+
 func syncSequenceAndNotify(state *session, messages []maildir.Message, write func(string, ...any) error, announceGrowth bool) ([]maildir.Message, error, bool) {
 	previous := append([]uint32(nil), state.sequence...)
 	wasReady := state.sequenceReady
@@ -1043,14 +1095,10 @@ func (s *Server) fetch(tag string, args []string, state *session, writer *bufio.
 		return
 	}
 	s.refreshRecent(state, messages)
-	var syncErr error
-	messages, syncErr, _ = syncSequenceAndNotify(state, messages, func(format string, args ...any) error {
-		_, err := fmt.Fprintf(writer, format+"\r\n", args...)
-		return err
-	}, true)
-	if syncErr != nil {
-		_ = writer.Flush()
-		return
+	var added bool
+	messages, added = sequenceMessages(state, messages)
+	if added {
+		fmt.Fprintf(writer, "* %d EXISTS\r\n", len(messages))
 	}
 	requested := strings.ToUpper(strings.Join(args[1:], " "))
 	if requested == "" {
@@ -1066,6 +1114,9 @@ func (s *Server) fetch(tag string, args []string, state *session, writer *bufio.
 	}
 	for _, number := range numbers {
 		message := messages[number-1]
+		if message.UID == 0 {
+			continue
+		}
 		bodySections := []fetchBodySection(nil)
 		var data []byte
 		dataLoaded := false
@@ -1598,10 +1649,12 @@ func (s *Server) storeFlags(tag string, args []string, state *session, write fun
 		return
 	}
 	s.refreshRecent(state, messages)
-	var syncErr error
-	messages, syncErr, _ = syncSequenceAndNotify(state, messages, write, true)
-	if syncErr != nil {
-		return
+	var added bool
+	messages, added = sequenceMessages(state, messages)
+	if added {
+		if err := write("* %d EXISTS", len(messages)); err != nil {
+			return
+		}
 	}
 	operation := strings.ToUpper(args[1])
 	silent := strings.HasSuffix(operation, ".SILENT")
@@ -1612,6 +1665,9 @@ func (s *Server) storeFlags(tag string, args []string, state *session, write fun
 		numbers = uidMessageNumbers(args[0], messages)
 	}
 	for _, number := range numbers {
+		if messages[number-1].UID == 0 {
+			continue
+		}
 		flags := messages[number-1].Flags
 		if operation == "FLAGS" {
 			flags = make(map[byte]bool)
@@ -1649,10 +1705,12 @@ func (s *Server) search(tag string, args []string, state *session, write func(st
 		return
 	}
 	s.refreshRecent(state, messages)
-	var syncErr error
-	messages, syncErr, _ = syncSequenceAndNotify(state, messages, write, true)
-	if syncErr != nil {
-		return
+	var added bool
+	messages, added = sequenceMessages(state, messages)
+	if added {
+		if err := write("* %d EXISTS", len(messages)); err != nil {
+			return
+		}
 	}
 	criteriaArgs := args
 	var uidSet map[uint32]bool
@@ -1673,6 +1731,9 @@ func (s *Server) search(tag string, args []string, state *session, write func(st
 	criteria := strings.ToUpper(strings.Join(criteriaArgs, " "))
 	var result []string
 	for index, message := range messages {
+		if message.UID == 0 {
+			continue
+		}
 		include := criteria == "" || criteria == "ALL"
 		if uidSet != nil {
 			include = uidSet[message.UID]
@@ -1719,25 +1780,33 @@ func (s *Server) copy(tag string, args []string, state *session, write func(stri
 		return
 	}
 	s.refreshRecent(state, messages)
-	var syncErr error
-	messages, syncErr, _ = syncSequenceAndNotify(state, messages, write, true)
-	if syncErr != nil {
-		return
+	var added bool
+	messages, added = sequenceMessages(state, messages)
+	if added {
+		if err := write("* %d EXISTS", len(messages)); err != nil {
+			return
+		}
 	}
 	selected := sequenceNumbers(args[0], len(messages))
 	if uid {
 		selected = uidMessageNumbers(args[0], messages)
 	}
-	source := make([]int, len(selected))
-	for index, number := range selected {
+	var source []int
+	for _, number := range selected {
+		if messages[number-1].UID == 0 {
+			continue
+		}
 		if uid {
-			source[index] = int(messages[number-1].UID)
+			source = append(source, int(messages[number-1].UID))
 		} else {
-			source[index] = number
+			source = append(source, number)
 		}
 	}
 	var destination []int
 	for _, number := range selected {
+		if messages[number-1].UID == 0 {
+			continue
+		}
 		data, readErr := s.Store.Read(messages[number-1])
 		if readErr != nil {
 			_ = write("%s NO cannot read message", tag)
@@ -1825,11 +1894,13 @@ func (s *Server) expunge(tag string, state *session, write func(string, ...any) 
 			if write("* %d EXPUNGE", index+1) != nil {
 				return
 			}
+			removeSequenceUID(state, messages[index].UID)
 		}
 	}
 	if messages, err = s.Store.List(state.mailbox); err == nil {
-		_ = syncSequence(state, messages)
-		state.exists = len(messages)
+		if _, syncErr, _ := syncSequenceAndNotify(state, messages, write, true); syncErr != nil {
+			return
+		}
 	}
 	_ = write("%s OK EXPUNGE completed", tag)
 }
@@ -1875,11 +1946,13 @@ func (s *Server) expungeUID(tag string, args []string, state *session, write fun
 			if write("* %d EXPUNGE", number) != nil {
 				return
 			}
+			removeSequenceUID(state, messages[number-1].UID)
 		}
 	}
 	if messages, err = s.Store.List(state.mailbox); err == nil {
-		_ = syncSequence(state, messages)
-		state.exists = len(messages)
+		if _, syncErr, _ := syncSequenceAndNotify(state, messages, write, true); syncErr != nil {
+			return
+		}
 	}
 	_ = write("%s OK UID EXPUNGE completed", tag)
 }
