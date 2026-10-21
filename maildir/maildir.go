@@ -385,9 +385,10 @@ func isHeaderLine(line []byte, continuation bool) bool {
 	return true
 }
 
-// List returns a stable snapshot of messages in new and cur, sorted by date
-// and filename. The returned flag maps are independent from the store. Each
-// message also receives a persistent UID, independent of its list position.
+// List returns a stable snapshot of messages in new and cur, ordered by their
+// persistent UID. The returned flag maps are independent from the store. New
+// messages receive UIDs in date and filename order before the snapshot is
+// sorted, so filesystem date changes cannot reorder existing messages.
 func (s *Store) List(user string) ([]Message, error) {
 	lock, err := s.mailboxLock(user)
 	if err != nil {
@@ -455,6 +456,9 @@ func (s *Store) List(user string) ([]Message, error) {
 		}
 		messages[index].UID = uid
 	}
+	sort.SliceStable(messages, func(i, j int) bool {
+		return messages[i].UID < messages[j].UID
+	})
 	if changed {
 		if err := saveUIDs(mailbox, uids, nextUID); err != nil {
 			return nil, err

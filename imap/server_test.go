@@ -665,6 +665,109 @@ func TestUIDFetchKeepsUIDForNewMessageWhenDateOrderChanges(t *testing.T) {
 	}
 }
 
+func TestSequenceFetchKeepsUIDWhenDateOrderChanges(t *testing.T) {
+	store, err := maildir.New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err := store.Deliver("alice", []byte("Subject: first\r\n\r\nfirst\r\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.List("alice"); err != nil {
+		t.Fatal(err)
+	}
+	server := &Server{Store: store}
+	state := &session{authenticated: true, selected: true, mailbox: "alice"}
+	var output bytes.Buffer
+	writer := bufio.NewWriter(&output)
+	server.fetch("a001", []string{"1", "(UID)"}, state, writer, false)
+	if got := output.String(); !strings.Contains(got, "UID 1") {
+		t.Fatalf("initial sequence fetch = %q; want UID 1", got)
+	}
+	output.Reset()
+
+	future := time.Now().Add(time.Hour)
+	if err := os.Chtimes(first.Path, future, future); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Deliver("alice", []byte("Subject: second\r\n\r\nsecond\r\n")); err != nil {
+		t.Fatal(err)
+	}
+	server.fetch("a002", []string{"1", "(UID)"}, state, writer, false)
+	if got := output.String(); !strings.Contains(got, "UID 1") {
+		t.Fatalf("sequence fetch after date change = %q; want original UID 1", got)
+	}
+}
+
+func TestSequenceFetchUsesSelectedSessionOrder(t *testing.T) {
+	store, err := maildir.New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Deliver("alice", []byte("Subject: first\r\n\r\nfirst\r\n")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Deliver("alice", []byte("Subject: second\r\n\r\nsecond\r\n")); err != nil {
+		t.Fatal(err)
+	}
+	messages, err := store.List("alice")
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := &Server{Store: store}
+	state := &session{
+		authenticated: true,
+		selected:      true,
+		mailbox:       "alice",
+		sequence:      []uint32{messages[1].UID, messages[0].UID},
+		sequenceReady: true,
+	}
+	var output bytes.Buffer
+	writer := bufio.NewWriter(&output)
+	server.fetch("a001", []string{"1", "(UID)"}, state, writer, false)
+	if got := output.String(); !strings.Contains(got, fmt.Sprintf("UID %d", messages[1].UID)) {
+		t.Fatalf("sequence fetch = %q; want selected-session UID %d", got, messages[1].UID)
+	}
+}
+
+func TestSequenceFetchNotifiesExternalExpungeBeforeRemapping(t *testing.T) {
+	store, err := maildir.New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Deliver("alice", []byte("Subject: first\r\n\r\nfirst\r\n")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Deliver("alice", []byte("Subject: second\r\n\r\nsecond\r\n")); err != nil {
+		t.Fatal(err)
+	}
+	messages, err := store.List("alice")
+	if err != nil {
+		t.Fatal(err)
+	}
+	state := &session{
+		authenticated: true,
+		selected:      true,
+		mailbox:       "alice",
+		sequence:      []uint32{messages[0].UID, messages[1].UID},
+		sequenceReady: true,
+	}
+	if err := store.DeleteFrom("alice", messages[0]); err != nil {
+		t.Fatal(err)
+	}
+	server := &Server{Store: store}
+	var output bytes.Buffer
+	server.fetch("a001", []string{"1", "(UID)"}, state, bufio.NewWriter(&output), false)
+	got := output.String()
+	if !strings.Contains(got, "* 1 EXPUNGE") {
+		t.Fatalf("sequence refresh = %q; want external expunge notification", got)
+	}
+	if !strings.Contains(got, fmt.Sprintf("* 1 FETCH (UID %d", messages[1].UID)) {
+		t.Fatalf("sequence fetch = %q; want remaining UID %d", got, messages[1].UID)
+	}
+}
+
 func TestUIDFetchReturnsRequestedBodySections(t *testing.T) {
 	store, err := maildir.New(t.TempDir())
 	if err != nil {
@@ -834,6 +937,37 @@ func TestHeaderFetchKeepsMessageUnread(t *testing.T) {
 	}
 	if strings.Contains(output.String(), "\\Recent") {
 		t.Fatalf("seen message fetch still reported \\Recent: %q", output.String())
+	}
+}
+
+func TestRecentMessageIsReportedToOnlyOneSession(t *testing.T) {
+	store, err := maildir.New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Deliver("alice", []byte("Subject: recent test\r\n\r\nmessage\r\n")); err != nil {
+		t.Fatal(err)
+	}
+	server := &Server{Store: store}
+	first := &session{authenticated: true, selected: true, mailbox: "alice"}
+	second := &session{authenticated: true, selected: true, mailbox: "alice"}
+	var output bytes.Buffer
+	writer := bufio.NewWriter(&output)
+	server.fetch("a001", []string{"1", "(UID FLAGS)"}, first, writer, true)
+	if err := writer.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(output.String(), "FLAGS (\\Recent)") {
+		t.Fatalf("first session flags = %q; want \\Recent", output.String())
+	}
+
+	output.Reset()
+	server.fetch("a002", []string{"1", "(UID FLAGS)"}, second, writer, true)
+	if err := writer.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(output.String(), "\\Recent") {
+		t.Fatalf("second session flags = %q; did not want \\Recent", output.String())
 	}
 }
 
