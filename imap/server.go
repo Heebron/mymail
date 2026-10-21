@@ -16,6 +16,7 @@ import (
 	"net"
 	netmail "net/mail"
 	"net/textproto"
+	"os"
 	"sort"
 	"strconv"
 	"strings"
@@ -1801,6 +1802,9 @@ func (s *Server) removeDeleted(state *session) error {
 	for index := len(messages) - 1; index >= 0; index-- {
 		if messages[index].Flags['D'] {
 			if err := s.Store.DeleteFrom(state.mailbox, messages[index]); err != nil {
+				if errors.Is(err, os.ErrNotExist) {
+					continue
+				}
 				return err
 			}
 		}

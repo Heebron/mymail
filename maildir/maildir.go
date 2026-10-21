@@ -611,5 +611,5 @@ func (s *Store) DeleteFrom(user string, message Message) error {
 	}
 	lock.Lock()
 	defer lock.Unlock()
-	return s.Delete(message)
+	return os.Remove(message.Path)
 }

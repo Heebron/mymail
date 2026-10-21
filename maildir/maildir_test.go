@@ -75,6 +75,23 @@ func TestDeliverNormalizesMessageLineEndings(t *testing.T) {
 	}
 }
 
+func TestDeleteFromReportsAlreadyDeletedMessage(t *testing.T) {
+	store, err := New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	message, err := store.Deliver("alice", []byte("Subject: delete\r\n\r\nbody\r\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.DeleteFrom("alice", message); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.DeleteFrom("alice", message); !os.IsNotExist(err) {
+		t.Fatalf("second delete error = %v, want not-exist", err)
+	}
+}
+
 func TestRejectsMailboxTraversal(t *testing.T) {
 	store, err := New(t.TempDir())
 	if err != nil {
