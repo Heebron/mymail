@@ -193,12 +193,13 @@ func syncSequence(state *session, messages []maildir.Message) []maildir.Message 
 	return ordered
 }
 
-func syncSequenceAndNotify(state *session, messages []maildir.Message, write func(string, ...any) error) ([]maildir.Message, error) {
+func syncSequenceAndNotify(state *session, messages []maildir.Message, write func(string, ...any) error, announceGrowth bool) ([]maildir.Message, error, bool) {
 	previous := append([]uint32(nil), state.sequence...)
 	wasReady := state.sequenceReady
 	messages = syncSequence(state, messages)
+	state.exists = len(messages)
 	if !wasReady {
-		return messages, nil
+		return messages, nil, false
 	}
 	present := make(map[uint32]bool, len(messages))
 	for _, message := range messages {
@@ -213,10 +214,29 @@ func syncSequenceAndNotify(state *session, messages []maildir.Message, write fun
 	sort.Ints(removed)
 	for index := len(removed) - 1; index >= 0; index-- {
 		if err := write("* %d EXPUNGE", removed[index]); err != nil {
-			return messages, err
+			return messages, err, false
 		}
 	}
-	return messages, nil
+	added := false
+	for _, message := range messages {
+		found := false
+		for _, uid := range previous {
+			if uid == message.UID {
+				found = true
+				break
+			}
+		}
+		if !found {
+			added = true
+			break
+		}
+	}
+	if added && announceGrowth {
+		if err := write("* %d EXISTS", len(messages)); err != nil {
+			return messages, err, true
+		}
+	}
+	return messages, nil, added
 }
 
 func (s *Server) handle(ctx context.Context, conn net.Conn) {
@@ -274,7 +294,7 @@ func (s *Server) handle(ctx context.Context, conn net.Conn) {
 				messages, _ := s.Store.List(state.mailbox)
 				s.refreshRecent(&state, messages)
 				var syncErr error
-				messages, syncErr = syncSequenceAndNotify(&state, messages, write)
+				messages, syncErr, _ = syncSequenceAndNotify(&state, messages, write, false)
 				if syncErr != nil {
 					return
 				}
@@ -406,7 +426,8 @@ func (s *Server) handle(ctx context.Context, conn net.Conn) {
 				continue
 			}
 			if state.selected && state.mailbox == mailbox {
-				messages, err = syncSequenceAndNotify(&state, messages, write)
+				s.refreshRecent(&state, messages)
+				messages, err, _ = syncSequenceAndNotify(&state, messages, write, false)
 				if err != nil {
 					return
 				}
@@ -441,21 +462,25 @@ func (s *Server) handle(ctx context.Context, conn net.Conn) {
 				continue
 			}
 			s.refreshRecent(&state, knownMessages)
-			selectedMessageCount := state.exists
 			if err := write("+ idling"); err != nil {
 				return
 			}
+			selectedMessageCount := state.exists
 			var syncErr error
-			knownMessages, syncErr = syncSequenceAndNotify(&state, knownMessages, write)
+			var added bool
+			knownMessages, syncErr, added = syncSequenceAndNotify(&state, knownMessages, write, true)
 			if syncErr != nil {
 				return
 			}
 			knownMessagesByUID := idleMessagesByUID(knownMessages)
-			if len(knownMessages) != selectedMessageCount {
+			if added {
+				if err := write("* %d RECENT", countRecent(knownMessages, state.recent)); err != nil {
+					return
+				}
+			} else if len(knownMessages) != selectedMessageCount {
 				if err := write("* %d EXISTS", len(knownMessages)); err != nil || write("* %d RECENT", countRecent(knownMessages, state.recent)) != nil {
 					return
 				}
-				state.exists = len(knownMessages)
 			}
 			type idleRead struct {
 				line string
@@ -1019,10 +1044,10 @@ func (s *Server) fetch(tag string, args []string, state *session, writer *bufio.
 	}
 	s.refreshRecent(state, messages)
 	var syncErr error
-	messages, syncErr = syncSequenceAndNotify(state, messages, func(format string, args ...any) error {
+	messages, syncErr, _ = syncSequenceAndNotify(state, messages, func(format string, args ...any) error {
 		_, err := fmt.Fprintf(writer, format+"\r\n", args...)
 		return err
-	})
+	}, true)
 	if syncErr != nil {
 		_ = writer.Flush()
 		return
@@ -1572,8 +1597,9 @@ func (s *Server) storeFlags(tag string, args []string, state *session, write fun
 		_ = write("%s NO mailbox unavailable", tag)
 		return
 	}
+	s.refreshRecent(state, messages)
 	var syncErr error
-	messages, syncErr = syncSequenceAndNotify(state, messages, write)
+	messages, syncErr, _ = syncSequenceAndNotify(state, messages, write, true)
 	if syncErr != nil {
 		return
 	}
@@ -1622,8 +1648,9 @@ func (s *Server) search(tag string, args []string, state *session, write func(st
 		_ = write("%s NO mailbox unavailable", tag)
 		return
 	}
+	s.refreshRecent(state, messages)
 	var syncErr error
-	messages, syncErr = syncSequenceAndNotify(state, messages, write)
+	messages, syncErr, _ = syncSequenceAndNotify(state, messages, write, true)
 	if syncErr != nil {
 		return
 	}
@@ -1691,8 +1718,9 @@ func (s *Server) copy(tag string, args []string, state *session, write func(stri
 		_ = write("%s NO mailbox unavailable", tag)
 		return
 	}
+	s.refreshRecent(state, messages)
 	var syncErr error
-	messages, syncErr = syncSequenceAndNotify(state, messages, write)
+	messages, syncErr, _ = syncSequenceAndNotify(state, messages, write, true)
 	if syncErr != nil {
 		return
 	}
@@ -1742,6 +1770,16 @@ func (s *Server) copy(tag string, args []string, state *session, write func(stri
 			}
 		}
 	}
+	if destinationMailbox == state.mailbox {
+		updated, listErr := s.Store.List(state.mailbox)
+		if listErr != nil {
+			_ = write("%s NO cannot refresh copied mailbox", tag)
+			return
+		}
+		if _, syncErr, _ := syncSequenceAndNotify(state, updated, write, true); syncErr != nil {
+			return
+		}
+	}
 	if uid && len(destination) > 0 {
 		_ = write("%s OK [COPYUID 1 %s %s] COPY completed", tag, sequenceSet(source), sequenceSet(destination))
 		return
@@ -1776,8 +1814,9 @@ func (s *Server) expunge(tag string, state *session, write func(string, ...any) 
 		_ = write("%s NO mailbox unavailable", tag)
 		return
 	}
+	s.refreshRecent(state, messages)
 	var syncErr error
-	messages, syncErr = syncSequenceAndNotify(state, messages, write)
+	messages, syncErr, _ = syncSequenceAndNotify(state, messages, write, true)
 	if syncErr != nil {
 		return
 	}
@@ -1790,6 +1829,7 @@ func (s *Server) expunge(tag string, state *session, write func(string, ...any) 
 	}
 	if messages, err = s.Store.List(state.mailbox); err == nil {
 		_ = syncSequence(state, messages)
+		state.exists = len(messages)
 	}
 	_ = write("%s OK EXPUNGE completed", tag)
 }
@@ -1822,8 +1862,9 @@ func (s *Server) expungeUID(tag string, args []string, state *session, write fun
 		_ = write("%s NO mailbox unavailable", tag)
 		return
 	}
+	s.refreshRecent(state, messages)
 	var syncErr error
-	messages, syncErr = syncSequenceAndNotify(state, messages, write)
+	messages, syncErr, _ = syncSequenceAndNotify(state, messages, write, true)
 	if syncErr != nil {
 		return
 	}
@@ -1838,6 +1879,7 @@ func (s *Server) expungeUID(tag string, args []string, state *session, write fun
 	}
 	if messages, err = s.Store.List(state.mailbox); err == nil {
 		_ = syncSequence(state, messages)
+		state.exists = len(messages)
 	}
 	_ = write("%s OK UID EXPUNGE completed", tag)
 }

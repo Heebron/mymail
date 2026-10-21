@@ -585,6 +585,9 @@ func TestHandleAppendVisibleThroughUIDRefresh(t *testing.T) {
 		t.Fatal(err)
 	}
 	writeLine("a004b UID SEARCH UID 2:*")
+	if result := readLine(); result != "* 2 EXISTS" {
+		t.Fatalf("UID search refresh = %q", result)
+	}
 	if result := readLine(); result != "* SEARCH 2" {
 		t.Fatalf("UID range search result = %q", result)
 	}
@@ -765,6 +768,40 @@ func TestSequenceFetchNotifiesExternalExpungeBeforeRemapping(t *testing.T) {
 	}
 	if !strings.Contains(got, fmt.Sprintf("* 1 FETCH (UID %d", messages[1].UID)) {
 		t.Fatalf("sequence fetch = %q; want remaining UID %d", got, messages[1].UID)
+	}
+}
+
+func TestSequenceFetchNotifiesExternalAppendBeforeFetching(t *testing.T) {
+	store, err := maildir.New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Deliver("alice", []byte("Subject: first\r\n\r\nfirst\r\n")); err != nil {
+		t.Fatal(err)
+	}
+	firstMessages, err := store.List("alice")
+	if err != nil || len(firstMessages) != 1 {
+		t.Fatalf("first messages = %#v, error = %v", firstMessages, err)
+	}
+	state := &session{
+		authenticated: true,
+		selected:      true,
+		mailbox:       "alice",
+		exists:        1,
+		sequence:      []uint32{firstMessages[0].UID},
+		sequenceReady: true,
+	}
+	if _, err := store.Deliver("alice", []byte("Subject: second\r\n\r\nsecond\r\n")); err != nil {
+		t.Fatal(err)
+	}
+	server := &Server{Store: store}
+	var output bytes.Buffer
+	server.fetch("a001", []string{"1:*", "(FLAGS)"}, state, bufio.NewWriter(&output), false)
+	got := output.String()
+	exists := strings.Index(got, "* 2 EXISTS")
+	fetch := strings.Index(got, "* 2 FETCH")
+	if exists < 0 || fetch < 0 || exists > fetch {
+		t.Fatalf("sequence fetch after external append = %q; want EXISTS before sequence 2 FETCH", got)
 	}
 }
 
@@ -1000,7 +1037,7 @@ func TestCopyAndUIDExpunge(t *testing.T) {
 		return nil
 	}
 	server.copy("a001", []string{"2", "INBOX"}, state, write, true)
-	if len(responses) != 1 || !strings.Contains(responses[0], "COPYUID 1 2 3") {
+	if len(responses) != 2 || responses[0] != "* 3 EXISTS" || !strings.Contains(responses[1], "COPYUID 1 2 3") {
 		t.Fatalf("copy responses = %#v", responses)
 	}
 	responses = nil
