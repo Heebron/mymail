@@ -38,6 +38,77 @@ func TestListenSupportsPlainAndTLS(t *testing.T) {
 	}
 }
 
+func TestUIDCommandReturnsOneResponseWhenNotAuthenticated(t *testing.T) {
+	store, err := maildir.New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := &Server{
+		Hostname: "mail.example.test",
+		Store:    store,
+		Logger:   slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}
+	serverConn, clientConn := net.Pipe()
+	defer clientConn.Close()
+	go server.handle(context.Background(), serverConn)
+
+	reader := bufio.NewReader(clientConn)
+	readLine := func() string {
+		t.Helper()
+		line, readErr := reader.ReadString('\n')
+		if readErr != nil {
+			t.Fatal(readErr)
+		}
+		return strings.TrimRight(line, "\r\n")
+	}
+	writeLine := func(line string) {
+		t.Helper()
+		if _, writeErr := io.WriteString(clientConn, line+"\r\n"); writeErr != nil {
+			t.Fatal(writeErr)
+		}
+	}
+
+	if greeting := readLine(); !strings.HasPrefix(greeting, "* OK") {
+		t.Fatalf("greeting = %q", greeting)
+	}
+	writeLine("a001 UID SEARCH ALL")
+	if response := readLine(); response != "a001 NO authenticate first" {
+		t.Fatalf("unauthenticated UID response = %q", response)
+	}
+	writeLine("a002 LOGOUT")
+	if response := readLine(); response != "* BYE logging out" {
+		t.Fatalf("logout greeting after UID response = %q", response)
+	}
+	if response := readLine(); response != "a002 OK LOGOUT completed" {
+		t.Fatalf("logout completion after UID response = %q", response)
+	}
+}
+
+func TestIMAPGreetingIncludesVersion(t *testing.T) {
+	store, err := maildir.New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := &Server{
+		Hostname: "mail.example.test",
+		Version:  "v1.2.3-test",
+		Store:    store,
+		Logger:   slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}
+	serverConn, clientConn := net.Pipe()
+	defer clientConn.Close()
+	go server.handle(context.Background(), serverConn)
+
+	reader := bufio.NewReader(clientConn)
+	greeting, err := reader.ReadString('\n')
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.TrimRight(greeting, "\r\n"); got != "* OK mail.example.test MyMail IMAP4rev1 ready (version v1.2.3-test)" {
+		t.Fatalf("greeting = %q", got)
+	}
+}
+
 func TestIMAPStartTLS(t *testing.T) {
 	store, err := maildir.New(t.TempDir())
 	if err != nil {
@@ -162,7 +233,7 @@ func TestHandleAuthenticatePlain(t *testing.T) {
 		}
 	}
 
-	if greeting := readLine(); greeting != "* OK mail.example.test MyMail IMAP4rev1 ready" {
+	if greeting := readLine(); greeting != "* OK mail.example.test MyMail IMAP4rev1 ready (version devel)" {
 		t.Fatalf("greeting = %q", greeting)
 	}
 	writeLine("a001 AUTHENTICATE PLAIN")
@@ -646,6 +717,16 @@ func TestUIDFetchReturnsEvolutionMessageMetadata(t *testing.T) {
 			t.Fatalf("Evolution fetch response = %q; missing %s", got, field)
 		}
 	}
+	for _, field := range []string{
+		fmt.Sprintf("RFC822.SIZE %d", len(message)),
+		`("TEXT" "PLAIN" ("CHARSET" "UTF-8")`,
+		`"Evolution metadata"`,
+		`NIL NIL "sender" "example.test"`,
+	} {
+		if !strings.Contains(got, field) {
+			t.Fatalf("Evolution fetch response = %q; missing metadata %s", got, field)
+		}
+	}
 }
 
 func TestFetchEnvelopeKeepsValidMetadataWithMalformedUnrelatedHeader(t *testing.T) {
@@ -653,6 +734,14 @@ func TestFetchEnvelopeKeepsValidMetadataWithMalformedUnrelatedHeader(t *testing.
 	envelope := fetchEnvelope(message)
 	if !strings.Contains(envelope, `"rendered subject"`) || !strings.Contains(envelope, `NIL NIL "sender" "example.test"`) {
 		t.Fatalf("ENVELOPE = %s; want valid Subject and From values", envelope)
+	}
+}
+
+func TestFetchBodyStructureKeepsMIMEMetadataWithMalformedUnrelatedHeader(t *testing.T) {
+	message := []byte("From: sender@example.test\r\nX-Malformed\r\nContent-Type: text/html; charset=UTF-8\r\n\r\n<html>body</html>\r\n")
+	structure := fetchBodyStructure(message)
+	if !strings.Contains(structure, `"TEXT" "HTML"`) || strings.Contains(structure, `"TEXT" "PLAIN" NIL NIL NIL "7BIT" 0 0`) {
+		t.Fatalf("BODYSTRUCTURE = %s; want MIME metadata despite unrelated malformed header", structure)
 	}
 }
 

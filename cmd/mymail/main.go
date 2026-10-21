@@ -175,7 +175,7 @@ func main() {
 	}
 	newIMAPServer := func(addr string, config *tls.Config) *imap.Server {
 		return &imap.Server{
-			Addr: addr, TLSConfig: config, StartTLSConfig: tlsConfig, RequireSTARTTLS: cfg.IMAPRequireSTARTTLS, Hostname: cfg.Hostname, Store: store,
+			Addr: addr, TLSConfig: config, StartTLSConfig: tlsConfig, RequireSTARTTLS: cfg.IMAPRequireSTARTTLS, Hostname: cfg.Hostname, Version: version, Store: store,
 			Resolve: func(username string) (string, bool) {
 				if mailbox, ok := cfg.Resolve(username); ok {
 					return mailbox, true

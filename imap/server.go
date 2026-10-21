@@ -39,6 +39,7 @@ type Server struct {
 	StartTLSConfig  *tls.Config
 	RequireSTARTTLS bool
 	Hostname        string
+	Version         string
 	Store           *maildir.Store
 	Resolve         Resolver
 	Authenticate    Authenticator
@@ -128,7 +129,11 @@ func (s *Server) handle(ctx context.Context, conn net.Conn) {
 		}
 		return writer.Flush()
 	}
-	if write("* OK %s MyMail IMAP4rev1 ready", s.Hostname) != nil {
+	version := s.Version
+	if version == "" {
+		version = "devel"
+	}
+	if write("* OK %s MyMail IMAP4rev1 ready (version %s)", s.Hostname, version) != nil {
 		return
 	}
 	var state session
@@ -435,8 +440,11 @@ func (s *Server) handle(ctx context.Context, conn net.Conn) {
 			}
 			s.fetch(tag, args, &state, writer, false)
 		case "UID":
-			if len(args) < 1 || !s.requireSelected(&state, tag, write) {
+			if len(args) < 1 {
 				_ = write("%s BAD UID requires a subcommand", tag)
+				continue
+			}
+			if !s.requireSelected(&state, tag, write) {
 				continue
 			}
 			switch strings.ToUpper(args[0]) {
@@ -902,7 +910,8 @@ func (s *Server) fetch(tag string, args []string, state *session, writer *bufio.
 		var data []byte
 		dataLoaded := false
 		if bodyRequested || structureRequested || envelopeRequested {
-			data, readErr := s.Store.Read(message)
+			var readErr error
+			data, readErr = s.Store.Read(message)
 			if readErr != nil {
 				continue
 			}
@@ -980,15 +989,15 @@ type mimeEntity struct {
 }
 
 func rootMIMEEntity(data []byte) (mimeEntity, error) {
-	message, err := netmail.ReadMessage(bytes.NewReader(data))
-	if err != nil {
-		return mimeEntity{}, err
+	separator, separatorSize := bytesIndex(data, []byte("\r\n\r\n"))
+	if separator < 0 {
+		separator, separatorSize = bytesIndex(data, []byte("\n\n"))
 	}
-	body, err := io.ReadAll(message.Body)
-	if err != nil {
-		return mimeEntity{}, err
+	body := []byte(nil)
+	if separator >= 0 {
+		body = data[separator+separatorSize:]
 	}
-	return mimeEntity{header: textproto.MIMEHeader(message.Header), body: body}, nil
+	return mimeEntity{header: parseEnvelopeHeaders(data), body: body}, nil
 }
 
 func formatMIMEBodyStructure(entity mimeEntity) string {
