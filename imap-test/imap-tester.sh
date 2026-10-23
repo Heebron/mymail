@@ -7,4 +7,4 @@ LOGIN="host=mymail.thepratts.info port=993 user=tester pass=changeit ssl=any-cer
 #docker run --rm -it -v ./volume:/data:ro dovecot/imaptest $LOGIN
 #docker run --rm -it -v ./volume:/data:ro dovecot/imaptest $LOGIN test=/data/rfc-compliance.script
 
-docker run --rm -it -v ./volume:/data:ro dovecot/imaptest $LOGIN clients=1 fetch2=10 store=10 delete=10
+docker run --rm -it -v ./volume:/data:ro dovecot/imaptest $LOGIN clients=4 fetch2=10 store=10 delete=10
