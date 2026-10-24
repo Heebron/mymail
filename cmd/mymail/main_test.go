@@ -74,3 +74,40 @@ func TestLogConfigUsersWritesOneRecordPerUser(t *testing.T) {
 		}
 	}
 }
+
+func TestLogCleartextPasswordWarnings(t *testing.T) {
+	var output bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&output, nil))
+	logCleartextPasswordWarnings(logger, map[string]config.User{
+		"bob@example.test": {
+			Password:       "bob-secret",
+			PasswordSHA256: "ignored-when-password-is-set",
+		},
+		"alice@example.test": {
+			PasswordSHA256: "alice-secret",
+		},
+	})
+
+	lines := strings.Split(strings.TrimSpace(output.String()), "\n")
+	if len(lines) != 1 {
+		t.Fatalf("cleartext password warning count = %d, want 1: %s", len(lines), output.String())
+	}
+	var record map[string]any
+	if err := json.Unmarshal([]byte(lines[0]), &record); err != nil {
+		t.Fatal(err)
+	}
+	if record["level"] != "WARN" {
+		t.Fatalf("warning level = %v, want WARN", record["level"])
+	}
+	if record["msg"] != "configuration user uses cleartext password" {
+		t.Fatalf("warning message = %v", record["msg"])
+	}
+	if record["username"] != "bob@example.test" {
+		t.Fatalf("warning username = %v", record["username"])
+	}
+	for _, secret := range []string{"bob-secret", "ignored-when-password-is-set", "alice-secret"} {
+		if strings.Contains(output.String(), secret) {
+			t.Fatalf("cleartext password warning contains credential material %q: %s", secret, output.String())
+		}
+	}
+}

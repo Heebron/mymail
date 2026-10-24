@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"gopkg.in/yaml.v3"
+	"mymail/auth"
 )
 
 type User struct {
@@ -28,6 +29,7 @@ type Config struct {
 	IMAPRequireSTARTTLS bool            `yaml:"imap_require_starttls,omitempty"`
 	TLSCertFile         string          `yaml:"tls_cert_file,omitempty"`
 	TLSKeyFile          string          `yaml:"tls_key_file,omitempty"`
+	AuthThrottle        auth.Config     `yaml:"auth_throttle"`
 	MaildirRoot         string          `yaml:"maildir_root"`
 	Hostname            string          `yaml:"hostname"`
 	Users               map[string]User `yaml:"users"`
@@ -38,6 +40,7 @@ func Defaults() Config {
 		SMTPListen:          "0.0.0.0:587",
 		SMTPCleartextListen: "0.0.0.0:25",
 		IMAPListen:          "0.0.0.0:1143",
+		AuthThrottle:        auth.DefaultConfig(),
 		MaildirRoot:         "/var/lib/mymail",
 		Hostname:            "localhost",
 		Users:               make(map[string]User),
@@ -101,6 +104,9 @@ func (c *Config) Validate() error {
 	if strings.TrimSpace(c.MaildirRoot) == "" || strings.TrimSpace(c.Hostname) == "" {
 		return errors.New("maildir_root and hostname are required")
 	}
+	if err := validateAuthThrottle(c.AuthThrottle); err != nil {
+		return err
+	}
 	if len(c.Users) == 0 {
 		return errors.New("at least one user is required")
 	}
@@ -139,6 +145,37 @@ func (c *Config) Validate() error {
 			}
 			aliases[key] = username
 		}
+	}
+	return nil
+}
+
+func validateAuthThrottle(throttle auth.Config) error {
+	if throttle.MaxAttemptsPerConnection == 0 && throttle.MaxFailuresPerIP == 0 && throttle.MaxFailuresPerAccount == 0 && throttle.BackoffBase == 0 && throttle.BackoffMax == 0 && throttle.ResponseDelayMax == 0 && throttle.FailureWindow == 0 {
+		return nil
+	}
+	if throttle.MaxAttemptsPerConnection <= 0 {
+		return errors.New("auth_throttle.max_attempts_per_connection must be greater than zero")
+	}
+	if throttle.MaxFailuresPerIP <= 0 {
+		return errors.New("auth_throttle.max_failures_per_ip must be greater than zero")
+	}
+	if throttle.MaxFailuresPerAccount <= 0 {
+		return errors.New("auth_throttle.max_failures_per_account must be greater than zero")
+	}
+	if throttle.BackoffBase <= 0 {
+		return errors.New("auth_throttle.backoff_base must be greater than zero")
+	}
+	if throttle.BackoffMax <= 0 {
+		return errors.New("auth_throttle.backoff_max must be greater than zero")
+	}
+	if throttle.ResponseDelayMax <= 0 {
+		return errors.New("auth_throttle.response_delay_max must be greater than zero")
+	}
+	if throttle.FailureWindow <= 0 {
+		return errors.New("auth_throttle.failure_window must be greater than zero")
+	}
+	if throttle.BackoffMax < throttle.BackoffBase {
+		return errors.New("auth_throttle.backoff_max must be at least backoff_base")
 	}
 	return nil
 }

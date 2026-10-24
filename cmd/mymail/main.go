@@ -49,6 +49,19 @@ func configLogUsers(users map[string]config.User) map[string]configLogUser {
 	return loggedUsers
 }
 
+func logCleartextPasswordWarnings(logger *slog.Logger, users map[string]config.User) {
+	usernames := make([]string, 0, len(users))
+	for username, user := range users {
+		if user.Password != "" {
+			usernames = append(usernames, username)
+		}
+	}
+	sort.Strings(usernames)
+	for _, username := range usernames {
+		logger.Warn("configuration user uses cleartext password", "username", username)
+	}
+}
+
 func logConfigUsers(logger *slog.Logger, users map[string]config.User) {
 	loggedUsers := configLogUsers(users)
 	usernames := make([]string, 0, len(loggedUsers))
@@ -103,10 +116,20 @@ func main() {
 		"smtp_require_starttls", cfg.SMTPRequireSTARTTLS,
 		"imap_require_starttls", cfg.IMAPRequireSTARTTLS,
 	)
+	logger.Info("configuration authentication throttling",
+		"max_attempts_per_connection", cfg.AuthThrottle.MaxAttemptsPerConnection,
+		"max_failures_per_ip", cfg.AuthThrottle.MaxFailuresPerIP,
+		"max_failures_per_account", cfg.AuthThrottle.MaxFailuresPerAccount,
+		"backoff_base", cfg.AuthThrottle.BackoffBase,
+		"backoff_max", cfg.AuthThrottle.BackoffMax,
+		"response_delay_max", cfg.AuthThrottle.ResponseDelayMax,
+		"failure_window", cfg.AuthThrottle.FailureWindow,
+	)
 	logger.Info("configuration storage",
 		"maildir_root", cfg.MaildirRoot,
 		"hostname", cfg.Hostname,
 	)
+	logCleartextPasswordWarnings(logger, cfg.Users)
 	logConfigUsers(logger, cfg.Users)
 	var tlsConfig *tls.Config
 	if cfg.TLSCertFile != "" || cfg.TLSKeyFile != "" {
@@ -158,7 +181,7 @@ func main() {
 	}
 
 	processors := plugins.New()
-	authConfig := auth.DefaultConfig()
+	authConfig := cfg.AuthThrottle
 	authConfig.Logger = logger
 	authLimiter := auth.NewLimiter(authConfig)
 	newSMTPServer := func(addr string, startTLSConfig *tls.Config, requireSTARTTLS bool) *smtp.Server {

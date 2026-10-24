@@ -54,6 +54,33 @@ func TestLimiterBackoffAndResetAfterSuccess(t *testing.T) {
 	}
 }
 
+func TestLimiterFailureReturnsBoundedResponseDelay(t *testing.T) {
+	config := Config{
+		MaxAttemptsPerConnection: 5,
+		MaxFailuresPerIP:         10,
+		MaxFailuresPerAccount:    10,
+		BackoffBase:              10 * time.Millisecond,
+		BackoffMax:               100 * time.Millisecond,
+		ResponseDelayMax:         15 * time.Millisecond,
+		FailureWindow:            time.Minute,
+	}
+	limiter := NewLimiter(config)
+	now := time.Unix(150, 0)
+	limiter.now = func() time.Time { return now }
+	connection := limiter.NewConnection("192.0.2.15:2525")
+
+	if delay := connection.Failure("alice@example.test"); delay != 10*time.Millisecond {
+		t.Fatalf("first response delay = %v, want 10ms", delay)
+	}
+	now = now.Add(10 * time.Millisecond)
+	if err := connection.Allow("alice@example.test"); err != nil {
+		t.Fatalf("attempt after first backoff blocked: %v", err)
+	}
+	if delay := connection.Failure("alice@example.test"); delay != 15*time.Millisecond {
+		t.Fatalf("bounded response delay = %v, want 15ms", delay)
+	}
+}
+
 func TestLimiterEnforcesConnectionIPAndAccountLimits(t *testing.T) {
 	config := Config{
 		MaxAttemptsPerConnection: 2,

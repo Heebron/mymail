@@ -6,13 +6,16 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/base64"
+	"fmt"
 	"io"
 	"log/slog"
 	"net"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
+	"mymail/auth"
 	"mymail/maildir"
 )
 
@@ -20,6 +23,45 @@ func TestParseSMTPPathAcceptsESMTPParameters(t *testing.T) {
 	address, ok := parseSMTPPath("FROM:<kenpratt@comcast.net> BODY=8BITMIME", "FROM:")
 	if !ok || address != "kenpratt@comcast.net" {
 		t.Fatalf("parseSMTPPath() = %q, %t; want kenpratt@comcast.net, true", address, ok)
+	}
+}
+
+func TestSMTPAuthenticationResponseDelayIsBounded(t *testing.T) {
+	limiter := auth.NewLimiter(auth.Config{
+		MaxAttemptsPerConnection: 5,
+		MaxFailuresPerIP:         10,
+		MaxFailuresPerAccount:    10,
+		BackoffBase:              100 * time.Millisecond,
+		BackoffMax:               time.Second,
+		ResponseDelayMax:         10 * time.Millisecond,
+		FailureWindow:            time.Minute,
+	})
+	server := &Server{
+		Authenticate: func(string, string) bool { return false },
+		Logger:       slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}
+	credentials := base64.StdEncoding.EncodeToString([]byte("\x00alice@example.test\x00wrong"))
+	var response string
+	start := time.Now()
+	err := server.authenticate(
+		"PLAIN "+credentials,
+		bufio.NewReader(strings.NewReader("")),
+		func(format string, args ...any) error {
+			response = fmt.Sprintf(format, args...)
+			return nil
+		},
+		new(bool),
+		"192.0.2.40:2525",
+		limiter.NewConnection("192.0.2.40:2525"),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if elapsed := time.Since(start); elapsed < 5*time.Millisecond || elapsed >= 80*time.Millisecond {
+		t.Fatalf("authentication response delay = %v, want at least 5ms and below 80ms", elapsed)
+	}
+	if response != "535 5.7.8 authentication credentials invalid" {
+		t.Fatalf("authentication response = %q", response)
 	}
 }
 

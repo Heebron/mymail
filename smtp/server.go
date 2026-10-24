@@ -562,7 +562,7 @@ func (s *Server) authenticate(argument string, reader *bufio.Reader, write func(
 			return throttleResponse(err)
 		}
 		if authConnection != nil {
-			authConnection.Failure(username)
+			time.Sleep(authConnection.Failure(username))
 		}
 		logResult(false, reason)
 		return write(response)
@@ -622,7 +622,7 @@ func (s *Server) authenticate(argument string, reader *bufio.Reader, write func(
 	}
 	if !s.Authenticate(username, password) {
 		if authConnection != nil {
-			authConnection.Failure(username)
+			time.Sleep(authConnection.Failure(username))
 		}
 		logResult(false, "invalid credentials")
 		return write("535 5.7.8 authentication credentials invalid")

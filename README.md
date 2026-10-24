@@ -38,10 +38,11 @@ service.
   slow log destination does not block SMTP or IMAP request handling. The
   bounded queue drops records under sustained output overload and is drained
   during graceful shutdown.
-- Shared SMTP and IMAP authentication throttling limits each connection to five
-  attempts, applies exponential backoff after failures, and tracks failures by
-  source IP and account. A successful login clears the associated IP and
-  account backoff state.
+- Shared SMTP and IMAP authentication throttling defaults to five attempts per
+  connection, applies exponential backoff after failures, and tracks failures
+  by source IP and account. Failed-authentication responses are delayed by at
+  most one second by default, and a successful login clears the associated IP
+  and account backoff state.
 - Per-user mailbox resolution and password or SHA-256 password authentication.
 - YAML configuration with sensible development defaults.
 
@@ -164,14 +165,82 @@ Each setting requires both TLS certificate files. The example configuration
 enables both settings.
 
 Authentication throttling is enabled by default and is shared by all SMTP and
-IMAP listeners. Each connection may make five authentication attempts; a
-source IP is limited to 20 failures and an account to 10 failures within a
-15-minute window. Failed attempts begin with a one-second backoff that grows
-exponentially to one minute. SMTP reports an exhausted connection limit and
-closes the connection; IMAP reports a `BYE` response. These limits are built-in
-defaults rather than YAML settings. Each allow, backoff, connection-limit,
-failure, and reset decision is emitted as a structured authentication throttle
-log without password data.
+IMAP listeners. All limits are configurable in the `auth_throttle` section;
+the defaults allow five attempts per connection, 20 failures per source IP,
+and 10 failures per account within a 15-minute window. Failed attempts begin
+with a one-second backoff that grows exponentially to one minute. For example:
+
+```yaml
+auth_throttle:
+  max_attempts_per_connection: 5
+  max_failures_per_ip: 20
+  max_failures_per_account: 10
+  backoff_base: 1s
+  backoff_max: 1m
+  response_delay_max: 1s
+  failure_window: 15m
+```
+
+The settings are:
+
+- `max_attempts_per_connection` limits the number of authentication checks on
+  one SMTP or IMAP connection. The next check after the limit is rejected and
+  SMTP closes the connection; IMAP returns a `BYE` response. This counter is
+  separate for every connection.
+- `max_failures_per_ip` tracks failed authentications from one source IP across
+  all SMTP and IMAP connections. When the count reaches this value, failures
+  use `backoff_max`; it is not a permanent IP ban.
+- `max_failures_per_account` tracks failed authentications for one normalized
+  account ID across all source IPs and both protocols. When the count reaches
+  this value, failures use `backoff_max`; it is not a permanent account ban.
+- `backoff_base` is the delay after the first failed authentication. Subsequent
+  failures increase the delay exponentially until `backoff_max` is reached.
+- `backoff_max` is the largest delay imposed after a failed authentication and
+  also the delay used when either failure threshold has been reached. It is the
+  lockout window, not the time a connection is held open; it must be at least
+  as long as `backoff_base`.
+- `response_delay_max` bounds how long SMTP or IMAP waits before returning a
+  failed-authentication response. It prevents the server from holding a TCP
+  connection for the full backoff, defaults to one second, and may be shorter
+  than `backoff_max`.
+- `failure_window` controls how long an IP or account's failure state remains
+  active. If no failure occurs during this period, its failure count and
+  backoff state expire. A successful authentication immediately clears the
+  matching IP and account state.
+
+All duration values use Go duration syntax, such as `500ms`, `1s`, `5m`, or
+`1h`. Every numeric limit and duration must be greater than zero. Omitting the
+`auth_throttle` section, or omitting an individual setting, uses the defaults
+shown above. Any configured value must be valid; the settings are not separate
+on/off switches. Because the limiter is shared, a failed SMTP login contributes
+to the same IP and account state used by IMAP.
+
+For each authentication attempt, the shared limiter first increments the
+connection's attempt counter and checks the source IP and normalized account
+ID for an active backoff. Attempts over `max_attempts_per_connection` are
+rejected. If either the IP or account is in backoff, authentication is rejected
+without checking the password. Otherwise, normal authentication proceeds; a
+failure records state for both the IP and account, while a successful login
+clears both states. Access to the limiter is synchronized across concurrent
+SMTP and IMAP connections.
+
+Backoff starts at `backoff_base` and doubles after each failure for the same
+key, up to `backoff_max`. Once either failure threshold is reached, the maximum
+backoff is used. Failure state expires after `failure_window` without another
+failure and is also cleared immediately by a successful authentication. IP
+addresses are normalized by removing their port, and account IDs are trimmed
+and converted to lowercase.
+
+After each failed authentication, SMTP and IMAP wait for the newly calculated
+backoff duration capped at `response_delay_max`, then return the normal failure
+response. The wait is bounded and occurs after the limiter releases its mutex;
+attempts rejected because of an active backoff or connection limit are not held
+open.
+
+SMTP reports an exhausted connection limit and closes the connection; IMAP
+reports a `BYE` response. Each allow, backoff, connection-limit, failure, and
+reset decision is emitted as a structured authentication throttle log without
+password data.
 
 ## SMTP processors
 

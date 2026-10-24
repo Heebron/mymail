@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func TestLoadYAML(t *testing.T) {
@@ -16,6 +17,14 @@ imap_tls_listen: 127.0.0.1:1993
 imap_require_starttls: true
 tls_cert_file: /etc/mymail/tls.crt
 tls_key_file: /etc/mymail/tls.key
+auth_throttle:
+  max_attempts_per_connection: 7
+  max_failures_per_ip: 23
+  max_failures_per_account: 11
+  backoff_base: 2s
+  backoff_max: 90s
+  response_delay_max: 3s
+  failure_window: 20m
 maildir_root: /var/lib/mymail
 hostname: mail.example.test
 users:
@@ -43,6 +52,9 @@ users:
 	}
 	if got.TLSCertFile != "/etc/mymail/tls.crt" || got.TLSKeyFile != "/etc/mymail/tls.key" {
 		t.Fatalf("TLS certificate files = %#v", got)
+	}
+	if got.AuthThrottle.MaxAttemptsPerConnection != 7 || got.AuthThrottle.MaxFailuresPerIP != 23 || got.AuthThrottle.MaxFailuresPerAccount != 11 || got.AuthThrottle.BackoffBase != 2*time.Second || got.AuthThrottle.BackoffMax != 90*time.Second || got.AuthThrottle.ResponseDelayMax != 3*time.Second || got.AuthThrottle.FailureWindow != 20*time.Minute {
+		t.Fatalf("authentication throttling = %#v", got.AuthThrottle)
 	}
 	if got.MaildirRoot != "/var/lib/mymail" || got.Hostname != "mail.example.test" {
 		t.Fatalf("server settings = %#v", got)
@@ -96,6 +108,47 @@ func TestDefaultsUseSMTPSubmissionSTARTTLSPort(t *testing.T) {
 	}
 	if config.SMTPCleartextListen != "0.0.0.0:25" {
 		t.Fatalf("SMTP cleartext listener = %q, want 0.0.0.0:25", config.SMTPCleartextListen)
+	}
+	if config.AuthThrottle.MaxAttemptsPerConnection != 5 || config.AuthThrottle.MaxFailuresPerIP != 20 || config.AuthThrottle.MaxFailuresPerAccount != 10 || config.AuthThrottle.BackoffBase != time.Second || config.AuthThrottle.BackoffMax != time.Minute || config.AuthThrottle.ResponseDelayMax != time.Second || config.AuthThrottle.FailureWindow != 15*time.Minute {
+		t.Fatalf("authentication throttling defaults = %#v", config.AuthThrottle)
+	}
+}
+
+func TestValidateRejectsInvalidAuthThrottle(t *testing.T) {
+	tests := []struct {
+		name   string
+		adjust func(*Config)
+	}{
+		{
+			name: "zero attempts",
+			adjust: func(config *Config) {
+				config.AuthThrottle.MaxAttemptsPerConnection = 0
+			},
+		},
+		{
+			name: "maximum below base",
+			adjust: func(config *Config) {
+				config.AuthThrottle.BackoffMax = time.Second
+				config.AuthThrottle.BackoffBase = 2 * time.Second
+			},
+		},
+		{
+			name: "zero response delay",
+			adjust: func(config *Config) {
+				config.AuthThrottle.ResponseDelayMax = 0
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			config := Defaults()
+			config.MaildirRoot = t.TempDir()
+			config.Users = map[string]User{"alice@example.test": {Password: "secret"}}
+			test.adjust(&config)
+			if err := config.Validate(); err == nil {
+				t.Fatal("Validate() accepted invalid authentication throttling")
+			}
+		})
 	}
 }
 

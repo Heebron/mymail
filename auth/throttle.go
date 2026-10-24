@@ -16,13 +16,14 @@ var (
 )
 
 type Config struct {
-	MaxAttemptsPerConnection int
-	MaxFailuresPerIP         int
-	MaxFailuresPerAccount    int
-	BackoffBase              time.Duration
-	BackoffMax               time.Duration
-	FailureWindow            time.Duration
-	Logger                   *slog.Logger
+	MaxAttemptsPerConnection int           `yaml:"max_attempts_per_connection"`
+	MaxFailuresPerIP         int           `yaml:"max_failures_per_ip"`
+	MaxFailuresPerAccount    int           `yaml:"max_failures_per_account"`
+	BackoffBase              time.Duration `yaml:"backoff_base"`
+	BackoffMax               time.Duration `yaml:"backoff_max"`
+	ResponseDelayMax         time.Duration `yaml:"response_delay_max"`
+	FailureWindow            time.Duration `yaml:"failure_window"`
+	Logger                   *slog.Logger  `yaml:"-"`
 }
 
 func DefaultConfig() Config {
@@ -32,6 +33,7 @@ func DefaultConfig() Config {
 		MaxFailuresPerAccount:    10,
 		BackoffBase:              time.Second,
 		BackoffMax:               time.Minute,
+		ResponseDelayMax:         time.Second,
 		FailureWindow:            15 * time.Minute,
 	}
 }
@@ -67,6 +69,9 @@ func NewLimiter(config Config) *Limiter {
 	}
 	if config.BackoffMax <= 0 {
 		config.BackoffMax = defaults.BackoffMax
+	}
+	if config.ResponseDelayMax <= 0 {
+		config.ResponseDelayMax = defaults.ResponseDelayMax
 	}
 	if config.FailureWindow <= 0 {
 		config.FailureWindow = defaults.FailureWindow
@@ -130,9 +135,9 @@ func (c *Connection) Allow(account string) error {
 	return nil
 }
 
-func (c *Connection) Failure(account string) {
+func (c *Connection) Failure(account string) time.Duration {
 	if c == nil || c.limiter == nil {
-		return
+		return 0
 	}
 	l := c.limiter
 	account = normalizeAccount(account)
@@ -142,6 +147,7 @@ func (c *Connection) Failure(account string) {
 	ipState := l.recordFailure(l.ips, c.ip, l.config.MaxFailuresPerIP, now)
 	accountState := l.recordFailure(l.accounts, account, l.config.MaxFailuresPerAccount, now)
 	l.log("authentication throttle failure", "remote_addr", c.ip, "account", account, "ip_failures", ipState.failures, "account_failures", accountState.failures, "ip_backoff", ipState.blockedUntil.Sub(now), "account_backoff", accountState.blockedUntil.Sub(now))
+	return l.responseDelay(now, ipState, accountState)
 }
 
 func (c *Connection) Success(account string) {
@@ -203,6 +209,19 @@ func (l *Limiter) recordFailure(states map[string]failureState, key string, maxF
 	state.blockedUntil = now.Add(backoff)
 	states[key] = state
 	return state
+}
+
+func (l *Limiter) responseDelay(now time.Time, states ...failureState) time.Duration {
+	delay := time.Duration(0)
+	for _, state := range states {
+		if remaining := state.blockedUntil.Sub(now); remaining > delay {
+			delay = remaining
+		}
+	}
+	if delay > l.config.ResponseDelayMax {
+		return l.config.ResponseDelayMax
+	}
+	return delay
 }
 
 func normalizeAccount(account string) string {

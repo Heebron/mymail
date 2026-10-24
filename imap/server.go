@@ -398,7 +398,7 @@ func (s *Server) handle(ctx context.Context, conn net.Conn) {
 							_ = write("%s NO [UNAVAILABLE] authentication temporarily unavailable", tag)
 							continue
 						}
-						authConnection.Failure("")
+						time.Sleep(authConnection.Failure(""))
 					}
 					message := "invalid credentials"
 					if errors.Is(authErr, errAuthenticationCancelled) {
@@ -877,7 +877,7 @@ func (s *Server) authenticateSession(tag, username, password string, state *sess
 	}
 	if !s.Authenticate(username, password) {
 		if authConnection != nil {
-			authConnection.Failure(username)
+			time.Sleep(authConnection.Failure(username))
 		}
 		_ = write("%s NO [AUTHENTICATIONFAILED] invalid credentials", tag)
 		return false, nil

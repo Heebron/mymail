@@ -16,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"mymail/auth"
 	"mymail/maildir"
 )
 
@@ -35,6 +36,48 @@ func TestListenSupportsPlainAndTLS(t *testing.T) {
 			}
 			defer listener.Close()
 		})
+	}
+}
+
+func TestIMAPAuthenticationResponseDelayIsBounded(t *testing.T) {
+	limiter := auth.NewLimiter(auth.Config{
+		MaxAttemptsPerConnection: 5,
+		MaxFailuresPerIP:         10,
+		MaxFailuresPerAccount:    10,
+		BackoffBase:              100 * time.Millisecond,
+		BackoffMax:               time.Second,
+		ResponseDelayMax:         10 * time.Millisecond,
+		FailureWindow:            time.Minute,
+	})
+	server := &Server{
+		Authenticate: func(string, string) bool { return false },
+	}
+	var response string
+	start := time.Now()
+	authenticated, err := server.authenticateSession(
+		"a001",
+		"alice@example.test",
+		"wrong",
+		&session{},
+		func(format string, args ...any) error {
+			response = fmt.Sprintf(format, args...)
+			return nil
+		},
+		"LOGIN",
+		true,
+		limiter.NewConnection("192.0.2.41:1143"),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if authenticated {
+		t.Fatal("invalid credentials authenticated")
+	}
+	if elapsed := time.Since(start); elapsed < 5*time.Millisecond || elapsed >= 80*time.Millisecond {
+		t.Fatalf("authentication response delay = %v, want at least 5ms and below 80ms", elapsed)
+	}
+	if response != "a001 NO [AUTHENTICATIONFAILED] invalid credentials" {
+		t.Fatalf("authentication response = %q", response)
 	}
 }
 

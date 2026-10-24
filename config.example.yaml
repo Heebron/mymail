@@ -12,6 +12,26 @@ smtp_require_starttls: true
 imap_require_starttls: true
 # IMAP may additionally use an implicit TLS listener.
 # imap_tls_listen: 0.0.0.0:993
+# Authentication throttling is shared by SMTP and IMAP listeners. Omit this
+# section, or an individual setting, to use the default shown here. Duration
+# values use Go syntax such as 1s or 15m.
+auth_throttle:
+  # Maximum authentication checks allowed on one SMTP or IMAP connection.
+  max_attempts_per_connection: 5
+  # Failed authentications tracked per source IP within failure_window.
+  max_failures_per_ip: 20
+  # Failed authentications tracked per account across all source IPs.
+  max_failures_per_account: 10
+  # Initial delay after a failed authentication; later delays grow
+  # exponentially until backoff_max.
+  backoff_base: 1s
+  # Largest authentication delay; must be at least backoff_base.
+  backoff_max: 1m
+  # Maximum time to delay a failed-authentication response. This is separate
+  # from backoff_max so failed connections are never held for the full lockout.
+  response_delay_max: 1s
+  # Time without a failure before IP and account failure state expires.
+  failure_window: 15m
 # Values may use environment variables, for example: ${HOME}/mymail
 maildir_root: /mnt/probox/@email
 hostname: leopard.thepratts.info
