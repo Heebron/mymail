@@ -21,7 +21,6 @@ hostname: mail.example.test
 users:
   Alice@Example.Test:
     password: secret
-    mailbox: alice
     aliases:
       - alias@example.test
 `)
@@ -51,17 +50,42 @@ users:
 	if !got.Authenticate("alice@example.test", "secret") {
 		t.Fatal("Authenticate() rejected valid YAML credentials")
 	}
-	if !got.Authenticate("alice", "secret") {
-		t.Fatal("Authenticate() rejected the local username for a full-address account")
+	if got.Authenticate("alice", "secret") {
+		t.Fatal("Authenticate() accepted the local username for a full-address account")
 	}
-	if mailbox, ok := got.Resolve("alice@example.test"); !ok || mailbox != "alice" {
+	if mailbox, ok := got.Resolve("alice@example.test"); !ok || mailbox != "alice@example.test" {
 		t.Fatalf("Resolve() = %q, %t", mailbox, ok)
 	}
-	if mailbox, ok := got.Resolve("alice"); !ok || mailbox != "alice" {
-		t.Fatalf("Resolve() for local username = %q, %t", mailbox, ok)
+	if mailbox, ok := got.Resolve("alice"); ok {
+		t.Fatalf("Resolve() accepted local username with mailbox %q", mailbox)
 	}
-	if mailbox, ok := got.Resolve("alias@example.test"); !ok || mailbox != "alice" {
+	if mailbox, ok := got.Resolve("alias@example.test"); !ok || mailbox != "alice@example.test" {
 		t.Fatalf("Resolve() for alias = %q, %t", mailbox, ok)
+	}
+}
+
+func TestAuthenticateRequiresFullEmailAddress(t *testing.T) {
+	config := Config{Users: map[string]User{
+		"alice@example.test": {Password: "secret"},
+	}}
+	tests := []struct {
+		name     string
+		username string
+		password string
+		want     bool
+	}{
+		{name: "full email", username: "alice@example.test", password: "secret", want: true},
+		{name: "case insensitive full email", username: "ALICE@EXAMPLE.TEST", password: "secret", want: true},
+		{name: "local part", username: "alice", password: "secret", want: false},
+		{name: "different email", username: "alice@example.org", password: "secret", want: false},
+		{name: "wrong password", username: "alice@example.test", password: "wrong", want: false},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := config.Authenticate(test.username, test.password); got != test.want {
+				t.Fatalf("Authenticate(%q, %q) = %t, want %t", test.username, test.password, got, test.want)
+			}
+		})
 	}
 }
 
@@ -127,13 +151,6 @@ func TestValidateRejectsDuplicateMailboxes(t *testing.T) {
 			users: map[string]User{
 				"alice@example.test": {Password: "secret", Mailbox: "shared"},
 				"bob@example.test":   {Password: "secret", Mailbox: "shared"},
-			},
-		},
-		{
-			name: "default mailbox",
-			users: map[string]User{
-				"alice@example.test": {Password: "secret"},
-				"alice@example.org":  {Password: "secret"},
 			},
 		},
 	}

@@ -203,25 +203,13 @@ func (c *Config) findUser(username string) (User, bool) {
 			return user, true
 		}
 	}
-	if strings.Contains(username, "@") {
-		return User{}, false
-	}
-	var match User
-	matches := 0
-	for configured, user := range c.Users {
-		local, _, hasDomain := strings.Cut(strings.ToLower(strings.TrimSpace(configured)), "@")
-		if hasDomain && local == username {
-			match = user
-			matches++
-		}
-	}
-	return match, matches == 1
+	return User{}, false
 }
 
 func mailboxFor(username string, user User) string {
 	mailbox := user.Mailbox
 	if mailbox == "" {
-		mailbox = strings.Split(strings.ToLower(strings.TrimSpace(username)), "@")[0]
+		mailbox = strings.ToLower(strings.TrimSpace(username))
 	}
 	return mailbox
 }

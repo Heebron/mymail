@@ -90,7 +90,7 @@ small `mymail-send` client:
 ```sh
 go build -o mymail-send ./cmd/mymail-send
 ./mymail-send -from kpratt@leopard.thepratts.info -to kpratt@leopard.thepratts.info \
-  -username kpratt -password changeit
+  -username kpratt@leopard.thepratts.info -password changeit
 ```
 
 Use `-server host:port` for another endpoint. The client also accepts
@@ -109,10 +109,11 @@ prevents the server from operating as an open relay.
 
 ## Configuration
 
-`config.example.yaml` contains the complete schema. User keys are accepted as
-full addresses (for example `alice@example.test`) or local names. `mailbox`
-is the directory name below `maildir_root`; it must not contain path
-separators. A user's optional `aliases` list routes additional recipient
+`config.example.yaml` contains the complete schema. User keys are full email
+addresses (for example `alice@example.test`) and are used as login IDs. If
+`mailbox` is omitted, it defaults to the full email address; otherwise it is
+the directory name below `maildir_root` and must not contain path separators.
+A user's optional `aliases` list routes additional recipient
 addresses to the same mailbox without creating separate login accounts. For
 example:
 

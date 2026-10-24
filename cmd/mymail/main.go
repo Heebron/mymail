@@ -154,13 +154,7 @@ func main() {
 		return cfg.IsLocalDomain(domain)
 	}
 	authenticate := func(username, password string) bool {
-		if cfg.Authenticate(username, password) {
-			return true
-		}
-		if at := strings.IndexByte(username, '@'); at > 0 {
-			return cfg.Authenticate(username[:at], password)
-		}
-		return false
+		return cfg.Authenticate(username, password)
 	}
 
 	processors := plugins.New()
@@ -177,13 +171,7 @@ func main() {
 		return &imap.Server{
 			Addr: addr, TLSConfig: config, StartTLSConfig: tlsConfig, RequireSTARTTLS: cfg.IMAPRequireSTARTTLS, Hostname: cfg.Hostname, Version: version, Store: store,
 			Resolve: func(username string) (string, bool) {
-				if mailbox, ok := cfg.Resolve(username); ok {
-					return mailbox, true
-				}
-				if at := strings.IndexByte(username, '@'); at > 0 {
-					return cfg.Resolve(username[:at])
-				}
-				return "", false
+				return cfg.Resolve(username)
 			},
 			Authenticate: authenticate, AuthLimiter: authLimiter, Logger: logger,
 		}
