@@ -47,6 +47,7 @@ type Server struct {
 	Authenticate    Authenticator
 	AuthLimiter     *auth.Limiter
 	Logger          *slog.Logger
+	OnReady         func()
 	recentMu        sync.Mutex
 	recentClaims    map[string]map[uint32]struct{}
 }
@@ -66,6 +67,9 @@ func (s *Server) ListenAndServe(ctx context.Context) error {
 		return fmt.Errorf("listen %s imap on %s: %w", tlsLabel(s.TLSConfig), s.Addr, err)
 	}
 	s.Logger.Info("IMAP server listening", "address", listener.Addr().String(), "tls", s.TLSConfig != nil)
+	if s.OnReady != nil {
+		s.OnReady()
+	}
 	go func() {
 		<-ctx.Done()
 		_ = listener.Close()

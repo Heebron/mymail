@@ -8,15 +8,18 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"net/mail"
 	"os"
 	"os/signal"
 	"sort"
 	"strings"
 	"syscall"
+	"time"
 
 	"mymail/auth"
 	"mymail/config"
+	"mymail/health"
 	"mymail/imap"
 	"mymail/logging"
 	"mymail/maildir"
@@ -181,6 +184,11 @@ func main() {
 	}
 
 	processors := plugins.New()
+	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer cancel()
+	for _, failure := range processors.Initialize(ctx) {
+		logger.Warn("plugin initialization failed", "plugin", failure.Processor.Name(), "error", failure.Err)
+	}
 	authConfig := cfg.AuthThrottle
 	authConfig.Logger = logger
 	authLimiter := auth.NewLimiter(authConfig)
@@ -208,9 +216,16 @@ func main() {
 		imapServers = append(imapServers, newIMAPServer(cfg.IMAPTLSListen, tlsConfig.Clone()))
 	}
 
-	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer cancel()
-	listenerCount := len(smtpServers) + len(imapServers)
+	status := health.New(len(smtpServers), len(imapServers))
+	for _, server := range smtpServers {
+		server.OnReady = status.MarkSMTPReady
+	}
+	for _, server := range imapServers {
+		server.OnReady = status.MarkIMAPReady
+	}
+	status.PluginsInitialized()
+	healthServer := &http.Server{Addr: cfg.HealthListen, Handler: status}
+	listenerCount := len(smtpServers) + len(imapServers) + 1
 	errorsCh := make(chan error, listenerCount)
 	for _, server := range smtpServers {
 		go func() { errorsCh <- server.ListenAndServe(ctx) }()
@@ -218,6 +233,19 @@ func main() {
 	for _, server := range imapServers {
 		go func() { errorsCh <- server.ListenAndServe(ctx) }()
 	}
+	go func() {
+		if err := healthServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			errorsCh <- err
+			return
+		}
+		errorsCh <- nil
+	}()
+	go func() {
+		<-ctx.Done()
+		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer shutdownCancel()
+		_ = healthServer.Shutdown(shutdownCtx)
+	}()
 	var firstErr error
 	for range listenerCount {
 		if err := <-errorsCh; err != nil && !errors.Is(err, context.Canceled) && firstErr == nil {

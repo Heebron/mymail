@@ -31,6 +31,8 @@ func NewKeywordSpamFilter(keywords ...string) *KeywordSpamFilter {
 
 func (f *KeywordSpamFilter) Name() string { return "keyword-spam-filter" }
 
+func (f *KeywordSpamFilter) Initialize(context.Context) error { return nil }
+
 func (f *KeywordSpamFilter) Process(ctx context.Context, message *Message) (Result, error) {
 	if err := ctx.Err(); err != nil {
 		return Result{}, err

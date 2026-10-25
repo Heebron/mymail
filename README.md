@@ -143,6 +143,7 @@ printf '%s\n' 'changeit' | ./mymail-password
 
 The command prints the lowercase SHA-256 hexadecimal string to place in
 `password_sha256`.
+
 Configuration values may contain `${ENV_VARIABLE}` placeholders; variables
 defined in the daemon's environment are substituted when the file is loaded.
 For example:
@@ -245,7 +246,12 @@ password data.
 ## SMTP processors
 
 Processors implement `plugins.Processor` and are run in registration order
-after the SMTP message has been read and before it is delivered:
+after the SMTP message has been read and before it is delivered. MyMail calls
+`Initialize` for every registered processor before opening the mail listeners;
+an initialization error is logged as a warning and that processor is omitted
+from processing. A processor can update `Message.Data` and set `Message.Folder`
+(or return a folder in its `Result`) to route a locally delivered message to a
+Maildir++ folder:
 
 ```go
 spamFilter := plugins.NewKeywordSpamFilter("buy now", "free money", "viagra")
@@ -257,6 +263,9 @@ Register processors on the chain before starting the listeners:
 processors := plugins.New()
 _ = processors.Add(spamFilter)
 ```
+
+Processors must implement `Initialize(context.Context) error` in addition to
+`Name` and `Process`.
 
 See `plugins/example_test.go` for a complete, executable example that builds
 the chain and processes a message.

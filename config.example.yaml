@@ -3,6 +3,7 @@ smtp_listen: 0.0.0.0:587
 # Optional cleartext SMTP listener, normally used for port 25 delivery.
 smtp_cleartext_listen: 0.0.0.0:25
 imap_listen: 0.0.0.0:1143
+health_listen: 0.0.0.0:8080
 # Certificate files enable STARTTLS on the SMTP submission and IMAP listeners.
 tls_cert_file: /etc/mymail/tls.crt
 tls_key_file: /etc/mymail/tls.key

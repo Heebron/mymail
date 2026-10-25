@@ -46,6 +46,7 @@ type Server struct {
 	Authenticate    Authenticator
 	AuthLimiter     *auth.Limiter
 	Logger          *slog.Logger
+	OnReady         func()
 }
 
 func (s *Server) ListenAndServe(ctx context.Context) error {
@@ -63,6 +64,9 @@ func (s *Server) ListenAndServe(ctx context.Context) error {
 		return fmt.Errorf("listen SMTP on %s: %w", s.Addr, err)
 	}
 	s.Logger.Info("SMTP server listening", "address", listener.Addr().String(), "tls", false)
+	if s.OnReady != nil {
+		s.OnReady()
+	}
 	go func() {
 		<-ctx.Done()
 		_ = listener.Close()
@@ -306,11 +310,11 @@ func (s *Server) handle(ctx context.Context, conn net.Conn) {
 				logger.Info("SMTP message discarded", "remote_addr", remoteAddr)
 				_ = write("250 2.0.0 message accepted")
 			default:
-				if err := s.deliver(ctx, tx, data); err != nil {
+				if err := s.deliver(ctx, tx, message); err != nil {
 					logger.Warn("SMTP delivery failed", "remote_addr", remoteAddr, "error", err)
 					_ = write("451 4.3.0 delivery temporarily unavailable")
 				} else {
-					logger.Info("SMTP delivery completed", "remote_addr", remoteAddr, "local_recipients", len(tx.mailboxes), "forwarded_recipients", len(tx.forward), "bytes", len(data))
+					logger.Info("SMTP delivery completed", "remote_addr", remoteAddr, "local_recipients", len(tx.mailboxes), "forwarded_recipients", len(tx.forward), "bytes", len(message.Data))
 					_ = write("250 2.0.0 message accepted for delivery")
 				}
 			}
@@ -336,13 +340,14 @@ func (s *Server) handle(ctx context.Context, conn net.Conn) {
 	}
 }
 
-func (s *Server) deliver(ctx context.Context, tx transaction, data []byte) error {
+func (s *Server) deliver(ctx context.Context, tx transaction, message *plugins.Message) error {
+	data := message.Data
 	for _, mailbox := range tx.mailboxes {
-		message, err := s.Store.Deliver(mailbox, data)
+		delivered, err := s.Store.DeliverToFolder(mailbox, message.Folder, data)
 		if err != nil {
 			return err
 		}
-		s.logger().Info("SMTP local delivery completed", "mailbox", mailbox, "filename", message.Filename, "bytes", len(data))
+		s.logger().Info("SMTP local delivery completed", "mailbox", mailbox, "folder", message.Folder, "filename", delivered.Filename, "bytes", len(data))
 	}
 	for _, recipient := range tx.forward {
 		if err := s.forward(ctx, tx.from, recipient, data); err != nil {

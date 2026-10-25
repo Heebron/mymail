@@ -32,6 +32,7 @@ type Config struct {
 	AuthThrottle        auth.Config     `yaml:"auth_throttle"`
 	MaildirRoot         string          `yaml:"maildir_root"`
 	Hostname            string          `yaml:"hostname"`
+	HealthListen        string          `yaml:"health_listen"`
 	Users               map[string]User `yaml:"users"`
 }
 
@@ -43,6 +44,7 @@ func Defaults() Config {
 		AuthThrottle:        auth.DefaultConfig(),
 		MaildirRoot:         "/var/lib/mymail",
 		Hostname:            "localhost",
+		HealthListen:        "0.0.0.0:8080",
 		Users:               make(map[string]User),
 	}
 }
@@ -72,6 +74,7 @@ func (c *Config) expandEnvironment() {
 	c.TLSKeyFile = expandEnvironment(c.TLSKeyFile)
 	c.MaildirRoot = expandEnvironment(c.MaildirRoot)
 	c.Hostname = expandEnvironment(c.Hostname)
+	c.HealthListen = expandEnvironment(c.HealthListen)
 	for username, user := range c.Users {
 		user.Password = expandEnvironment(user.Password)
 		user.PasswordSHA256 = expandEnvironment(user.PasswordSHA256)
