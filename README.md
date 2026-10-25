@@ -3,7 +3,7 @@
 MyMail is a combined, concurrent SMTP receiving and IMAP4rev1 server written
 in Go. Messages are stored as standard Maildir files, with one mailbox per
 configured user. The binary is designed to run as a long-lived `systemd`
-service.
+service or as a Kubernetes StatefulSet.
 
 ## Documentation
 
@@ -56,11 +56,18 @@ service.
 - Per-user mailbox resolution and password or SHA-256 password authentication.
 - YAML configuration with sensible development defaults.
 
-## Build and run
+## Build and deploy
 
 ```sh
 make VERSION=v1.0.0 mymail
 ./mymail -version
+```
+
+### `systemd`
+
+Install the service unit, configuration, and binary:
+
+```sh
 install -Dm644 deploy/mymail.service /etc/systemd/system/mymail.service
 install -Dm644 config.example.yaml /etc/mymail/config.yaml
 install -Dm755 mymail /usr/local/bin/mymail
@@ -121,6 +128,25 @@ expose an implicit TLS listener by setting `imap_tls_listen`.
 The checked-in `config.example.yaml` demonstrates STARTTLS with certificate
 paths under `/etc/mymail`; install those files before starting the service, or
 comment the two TLS file entries when running without TLS.
+
+### Kubernetes
+
+The [`k8s/`](k8s/) directory provides a Kustomize deployment with a
+StatefulSet, persistent Maildir storage, mail services, and liveness and
+readiness probes. Before applying it, update the container image and storage
+settings for your cluster and make the MyMail configuration available at
+`/mymail-data/config.yaml` on the persistent volume.
+
+Preview and apply the manifests with:
+
+```sh
+kubectl kustomize k8s
+kubectl apply -k k8s
+```
+
+The Kubernetes deployment exposes SMTP, submission, IMAP, and implicit TLS
+IMAP through a `LoadBalancer` service. During pod shutdown, readiness fails
+immediately and the pod has up to 180 seconds to drain existing connections.
 
 ### `mymail-send`
 
