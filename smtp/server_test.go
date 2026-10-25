@@ -17,7 +17,20 @@ import (
 
 	"mymail/auth"
 	"mymail/maildir"
+	"mymail/plugins"
 )
+
+type folderProcessor struct {
+	folder string
+}
+
+func (p *folderProcessor) Name() string { return "folder" }
+
+func (p *folderProcessor) Initialize(context.Context) error { return nil }
+
+func (p *folderProcessor) Process(context.Context, *plugins.Message) (plugins.Result, error) {
+	return plugins.Result{Decision: plugins.Accept, Folder: p.folder}, nil
+}
 
 func TestParseSMTPPathAcceptsESMTPParameters(t *testing.T) {
 	address, ok := parseSMTPPath("FROM:<kenpratt@comcast.net> BODY=8BITMIME", "FROM:")
@@ -161,6 +174,44 @@ func TestSMTPDeliveryReachesResolvedInbox(t *testing.T) {
 	}
 	if strings.Contains(output, "changeit") || strings.Contains(output, credentials) || strings.Contains(output, "hello") {
 		t.Fatalf("SMTP logs exposed sensitive message data: %s", output)
+	}
+}
+
+func TestPluginDeliveryCreatesMissingFolder(t *testing.T) {
+	store, err := maildir.New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	processors := plugins.New()
+	if err := processors.Add(&folderProcessor{folder: "PluginArchive"}); err != nil {
+		t.Fatal(err)
+	}
+	if failures := processors.Initialize(context.Background()); len(failures) != 0 {
+		t.Fatalf("initialization failures = %#v", failures)
+	}
+	message := &plugins.Message{Data: []byte("Subject: plugin folder\r\n\r\nbody")}
+	result := processors.Process(context.Background(), message)
+	if result.Decision != plugins.Accept || message.Folder != "PluginArchive" {
+		t.Fatalf("plugin result = %#v, message = %#v", result, message)
+	}
+
+	server := &Server{Store: store}
+	if err := server.deliver(context.Background(), transaction{mailboxes: []string{"alice"}}, message); err != nil {
+		t.Fatal(err)
+	}
+	folders, err := store.ListMailboxes("alice")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(folders) != 1 || folders[0] != "PluginArchive" {
+		t.Fatalf("folders = %#v, want [PluginArchive]", folders)
+	}
+	messages, err := store.List("alice/PluginArchive")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(messages) != 1 {
+		t.Fatalf("plugin folder messages = %d, want 1", len(messages))
 	}
 }
 

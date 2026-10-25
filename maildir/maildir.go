@@ -312,7 +312,8 @@ func (s *Store) Deliver(user string, data []byte) (Message, error) {
 }
 
 // DeliverToFolder atomically adds a message to a user's inbox or Maildir++
-// folder. An empty folder or INBOX targets the inbox.
+// folder, creating the folder when it does not exist. An empty folder or INBOX
+// targets the inbox.
 func (s *Store) DeliverToFolder(user, folder string, data []byte) (Message, error) {
 	folder = strings.TrimSpace(folder)
 	if folder == "" || strings.EqualFold(folder, "INBOX") {
