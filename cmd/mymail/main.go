@@ -199,7 +199,7 @@ func main() {
 		case <-ctx.Done():
 		}
 	}()
-	for _, failure := range processors.Initialize(ctx) {
+	for _, failure := range processors.Initialize(ctx, cfg.Plugins) {
 		logger.Warn("plugin initialization failed", "plugin", failure.Processor.Name(), "error", failure.Err)
 	}
 	authConfig := cfg.AuthThrottle

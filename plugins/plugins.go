@@ -54,10 +54,19 @@ type Result struct {
 type Processor interface {
 	// Name returns a stable name for logs and error messages.
 	Name() string
-	// Initialize prepares the processor before listeners start.
-	Initialize(context.Context) error
+	// Initialize prepares the processor before listeners start. Settings are
+	// selected by the processor name from the daemon configuration.
+	Initialize(context.Context, map[string]string) error
 	// Process examines or changes one locally delivered message.
 	Process(context.Context, *Message) (Result, error)
+}
+
+// PluginConfig names one configured processor and its optional settings.
+type PluginConfig struct {
+	// Name identifies the processor that receives Config.
+	Name string `yaml:"name"`
+	// Config contains string settings passed to the processor at initialization.
+	Config map[string]string `yaml:"config,omitempty"`
 }
 
 // InitializationFailure identifies a processor that could not initialize.
@@ -88,13 +97,15 @@ func (c *Chain) Add(processor Processor) error {
 }
 
 // Initialize initializes each processor and removes processors that fail.
-func (c *Chain) Initialize(ctx context.Context) []InitializationFailure {
+// When configured is supplied, the first matching plugin name provides the
+// settings passed to that processor. Processors without settings receive nil.
+func (c *Chain) Initialize(ctx context.Context, configured ...[]PluginConfig) []InitializationFailure {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	active := make([]Processor, 0, len(c.processors))
 	var failures []InitializationFailure
 	for _, processor := range c.processors {
-		if err := initializeOne(ctx, processor); err != nil {
+		if err := initializeOne(ctx, processor, pluginSettings(processor.Name(), configured)); err != nil {
 			failures = append(failures, InitializationFailure{Processor: processor, Err: err})
 			continue
 		}
@@ -133,13 +144,36 @@ func (c *Chain) Process(ctx context.Context, message *Message) Result {
 	return Result{Decision: Accept}
 }
 
-func initializeOne(ctx context.Context, processor Processor) (err error) {
+func pluginSettings(name string, configured [][]PluginConfig) map[string]string {
+	if len(configured) == 0 {
+		return nil
+	}
+	for _, plugin := range configured[0] {
+		if plugin.Name == name {
+			return cloneSettings(plugin.Config)
+		}
+	}
+	return nil
+}
+
+func cloneSettings(settings map[string]string) map[string]string {
+	if settings == nil {
+		return nil
+	}
+	clone := make(map[string]string, len(settings))
+	for key, value := range settings {
+		clone[key] = value
+	}
+	return clone
+}
+
+func initializeOne(ctx context.Context, processor Processor, settings map[string]string) (err error) {
 	defer func() {
 		if recovered := recover(); recovered != nil {
 			err = fmt.Errorf("panic: %v", recovered)
 		}
 	}()
-	return processor.Initialize(ctx)
+	return processor.Initialize(ctx, settings)
 }
 
 func processOne(ctx context.Context, processor Processor, message *Message) (result Result, err error) {

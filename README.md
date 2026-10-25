@@ -208,6 +208,21 @@ maildir_root: ${HOME}/mymail
 
 Placeholders for variables that are not defined are left unchanged.
 
+Plugins may be configured as an ordered list of objects. Each object contains
+a plugin `name` and an optional string key/value `config` map passed to that
+plugin's `Initialize` method:
+
+```yaml
+plugins:
+  - name: example-plugin
+    config:
+      endpoint: ${EXAMPLE_PLUGIN_ENDPOINT}
+      token: ${EXAMPLE_PLUGIN_TOKEN}
+```
+
+Plugin setting values support the same environment expansion as other
+configuration values.
+
 `tls_cert_file` and `tls_key_file` enable `STARTTLS` on the SMTP
 `smtp_listen` and IMAP `imap_listen` endpoints. `imap_tls_listen` additionally
 enables an IMAP implicit TLS endpoint and requires both certificate files. TLS
@@ -323,8 +338,9 @@ processors := plugins.New()
 _ = processors.Add(spamFilter)
 ```
 
-Processors must implement `Initialize(context.Context) error` in addition to
-`Name` and `Process`.
+Processors must implement `Initialize(context.Context, map[string]string) error`
+in addition to `Name` and `Process`. `Initialize` receives the string settings
+configured for the processor name, or `nil` when no settings are configured.
 
 See `plugins/example_test.go` for a complete, executable example that builds
 the chain and processes a message.

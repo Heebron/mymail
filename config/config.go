@@ -11,6 +11,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 	"mymail/auth"
+	"mymail/plugins"
 )
 
 // User contains one login account, its mailbox mapping, and aliases.
@@ -25,6 +26,10 @@ type User struct {
 	// Aliases route additional recipient addresses to this user's mailbox.
 	Aliases []string `yaml:"aliases,omitempty"`
 }
+
+// PluginConfig names one configured plugin and its optional initialization
+// settings.
+type PluginConfig = plugins.PluginConfig
 
 // Config is the validated YAML configuration for the MyMail daemon.
 type Config struct {
@@ -53,6 +58,8 @@ type Config struct {
 	Hostname string `yaml:"hostname"`
 	// HealthListen is the address serving /healthz and /readyz.
 	HealthListen string `yaml:"health_listen"`
+	// Plugins contains plugin names and their initialization settings.
+	Plugins []PluginConfig `yaml:"plugins,omitempty"`
 	// Users maps login addresses to mailbox and authentication settings.
 	Users map[string]User `yaml:"users"`
 }
@@ -68,6 +75,7 @@ func Defaults() Config {
 		MaildirRoot:         "/var/lib/mymail",
 		Hostname:            "localhost",
 		HealthListen:        "0.0.0.0:8080",
+		Plugins:             []PluginConfig{},
 		Users:               make(map[string]User),
 	}
 }
@@ -108,6 +116,11 @@ func (c *Config) expandEnvironment() {
 		}
 		c.Users[username] = user
 	}
+	for index := range c.Plugins {
+		for key, value := range c.Plugins[index].Config {
+			c.Plugins[index].Config[key] = expandEnvironment(value)
+		}
+	}
 }
 
 func expandEnvironment(value string) string {
@@ -134,6 +147,19 @@ func (c *Config) Validate() error {
 	}
 	if err := validateAuthThrottle(c.AuthThrottle); err != nil {
 		return err
+	}
+	pluginNames := make(map[string]struct{}, len(c.Plugins))
+	for index := range c.Plugins {
+		plugin := &c.Plugins[index]
+		name := strings.TrimSpace(plugin.Name)
+		if name == "" {
+			return fmt.Errorf("plugins[%d] has an empty plugin name", index)
+		}
+		plugin.Name = name
+		if _, exists := pluginNames[name]; exists {
+			return fmt.Errorf("plugin %q is configured more than once", name)
+		}
+		pluginNames[name] = struct{}{}
 	}
 	if len(c.Users) == 0 {
 		return errors.New("at least one user is required")

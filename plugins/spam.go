@@ -33,7 +33,7 @@ func NewKeywordSpamFilter(keywords ...string) *KeywordSpamFilter {
 func (f *KeywordSpamFilter) Name() string { return "keyword-spam-filter" }
 
 // Initialize has no setup requirements for the keyword filter.
-func (f *KeywordSpamFilter) Initialize(context.Context) error { return nil }
+func (f *KeywordSpamFilter) Initialize(context.Context, map[string]string) error { return nil }
 
 // Process rejects a message containing any configured keyword.
 func (f *KeywordSpamFilter) Process(ctx context.Context, message *Message) (Result, error) {

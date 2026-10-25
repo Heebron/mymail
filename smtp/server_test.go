@@ -31,7 +31,7 @@ type countingProcessor struct {
 
 func (p *countingProcessor) Name() string { return "counting" }
 
-func (p *countingProcessor) Initialize(context.Context) error { return nil }
+func (p *countingProcessor) Initialize(context.Context, map[string]string) error { return nil }
 
 func (p *countingProcessor) Process(context.Context, *plugins.Message) (plugins.Result, error) {
 	p.calls++
@@ -57,7 +57,7 @@ func TestPluginMessageIncludesAbsoluteUserMaildir(t *testing.T) {
 
 func (p *folderProcessor) Name() string { return "folder" }
 
-func (p *folderProcessor) Initialize(context.Context) error { return nil }
+func (p *folderProcessor) Initialize(context.Context, map[string]string) error { return nil }
 
 func (p *folderProcessor) Process(context.Context, *plugins.Message) (plugins.Result, error) {
 	return plugins.Result{Decision: plugins.Accept, Folder: p.folder}, nil

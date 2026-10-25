@@ -8,21 +8,25 @@ import (
 )
 
 type testProcessor struct {
-	name       string
-	result     Result
-	initErr    error
-	initialize func(context.Context) error
-	mutate     func(*Message)
-	mu         sync.Mutex
-	initCalls  int
-	calls      int
+	name             string
+	result           Result
+	initErr          error
+	initialize       func(context.Context) error
+	initializeConfig func(context.Context, map[string]string) error
+	mutate           func(*Message)
+	mu               sync.Mutex
+	initCalls        int
+	calls            int
 }
 
 func (p *testProcessor) Name() string { return p.name }
-func (p *testProcessor) Initialize(ctx context.Context) error {
+func (p *testProcessor) Initialize(ctx context.Context, settings map[string]string) error {
 	p.mu.Lock()
 	p.initCalls++
 	p.mu.Unlock()
+	if p.initializeConfig != nil {
+		return p.initializeConfig(ctx, settings)
+	}
 	if p.initialize != nil {
 		return p.initialize(ctx)
 	}
@@ -112,6 +116,78 @@ func TestInitializeInvokesProcessorsInRegistrationOrder(t *testing.T) {
 	}
 }
 
+func TestInitializePassesMatchingPluginSettings(t *testing.T) {
+	var received map[string]string
+	processor := &testProcessor{
+		name: "configured",
+		initializeConfig: func(_ context.Context, settings map[string]string) error {
+			received = settings
+			return nil
+		},
+	}
+	unconfigured := &testProcessor{name: "unconfigured"}
+	chain := New()
+	if err := chain.Add(processor); err != nil {
+		t.Fatal(err)
+	}
+	if err := chain.Add(unconfigured); err != nil {
+		t.Fatal(err)
+	}
+	configured := []PluginConfig{
+		{Name: "configured", Config: map[string]string{"endpoint": "https://example.test", "token": "secret"}},
+	}
+	if failures := chain.Initialize(context.Background(), configured); len(failures) != 0 {
+		t.Fatalf("initialization failures = %#v", failures)
+	}
+	if got, want := received, map[string]string{"endpoint": "https://example.test", "token": "secret"}; !equalStringMap(got, want) {
+		t.Fatalf("configured settings = %#v, want %#v", got, want)
+	}
+}
+
+func TestInitializePassesNilToUnconfiguredProcessor(t *testing.T) {
+	var received map[string]string
+	processor := &testProcessor{
+		name: "unconfigured",
+		initializeConfig: func(_ context.Context, settings map[string]string) error {
+			received = settings
+			return nil
+		},
+	}
+	chain := New()
+	if err := chain.Add(processor); err != nil {
+		t.Fatal(err)
+	}
+	configured := []PluginConfig{{Name: "different", Config: map[string]string{"key": "value"}}}
+	if failures := chain.Initialize(context.Background(), configured); len(failures) != 0 {
+		t.Fatalf("initialization failures = %#v", failures)
+	}
+	if received != nil {
+		t.Fatalf("unconfigured settings = %#v, want nil", received)
+	}
+}
+
+func TestInitializeClonesPluginSettings(t *testing.T) {
+	configuredSettings := map[string]string{"token": "secret"}
+	processor := &testProcessor{
+		name: "configured",
+		initializeConfig: func(_ context.Context, settings map[string]string) error {
+			settings["token"] = "changed"
+			return nil
+		},
+	}
+	chain := New()
+	if err := chain.Add(processor); err != nil {
+		t.Fatal(err)
+	}
+	configured := []PluginConfig{{Name: "configured", Config: configuredSettings}}
+	if failures := chain.Initialize(context.Background(), configured); len(failures) != 0 {
+		t.Fatalf("initialization failures = %#v", failures)
+	}
+	if configuredSettings["token"] != "secret" {
+		t.Fatalf("configured settings were mutated: %#v", configuredSettings)
+	}
+}
+
 func TestInitializeDropsFailedProcessors(t *testing.T) {
 	failed := &testProcessor{name: "failed", initErr: errors.New("unavailable")}
 	healthy := &testProcessor{name: "healthy", result: Result{Decision: Accept}}
@@ -184,6 +260,18 @@ func equalStrings(got, want []string) bool {
 	}
 	for i := range got {
 		if got[i] != want[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func equalStringMap(got, want map[string]string) bool {
+	if len(got) != len(want) {
+		return false
+	}
+	for key, value := range want {
+		if got[key] != value {
 			return false
 		}
 	}

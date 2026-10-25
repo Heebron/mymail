@@ -27,6 +27,11 @@ auth_throttle:
   failure_window: 20m
 maildir_root: /var/lib/mymail
 hostname: mail.example.test
+plugins:
+  - name: test-plugin
+    config:
+      endpoint: https://plugin.example.test
+      token: configured-token
 users:
   Alice@Example.Test:
     password: secret
@@ -59,6 +64,9 @@ users:
 	if got.MaildirRoot != "/var/lib/mymail" || got.Hostname != "mail.example.test" {
 		t.Fatalf("server settings = %#v", got)
 	}
+	if len(got.Plugins) != 1 || got.Plugins[0].Name != "test-plugin" || got.Plugins[0].Config["endpoint"] != "https://plugin.example.test" || got.Plugins[0].Config["token"] != "configured-token" {
+		t.Fatalf("plugins = %#v", got.Plugins)
+	}
 	if !got.Authenticate("alice@example.test", "secret") {
 		t.Fatal("Authenticate() rejected valid YAML credentials")
 	}
@@ -73,6 +81,36 @@ users:
 	}
 	if mailbox, ok := got.Resolve("alias@example.test"); !ok || mailbox != "alice@example.test" {
 		t.Fatalf("Resolve() for alias = %q, %t", mailbox, ok)
+	}
+}
+
+func TestLoadYAMLPluginConfigurationIsOptionalAndOrdered(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	contents := []byte(`plugins:
+  - name: first-plugin
+  - name: second-plugin
+    config:
+      endpoint: https://plugin.example.test
+users:
+  alice@example.test:
+    password: secret
+`)
+	if err := os.WriteFile(path, contents, 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if len(got.Plugins) != 2 {
+		t.Fatalf("plugin count = %d, want 2", len(got.Plugins))
+	}
+	if got.Plugins[0].Name != "first-plugin" || got.Plugins[0].Config != nil {
+		t.Fatalf("first plugin = %#v, want name with nil config", got.Plugins[0])
+	}
+	if got.Plugins[1].Name != "second-plugin" || got.Plugins[1].Config["endpoint"] != "https://plugin.example.test" {
+		t.Fatalf("second plugin = %#v", got.Plugins[1])
 	}
 }
 
@@ -194,6 +232,33 @@ func TestValidateRejectsDuplicateAliases(t *testing.T) {
 	}
 }
 
+func TestValidateRejectsInvalidPlugins(t *testing.T) {
+	base := Config{
+		SMTPListen:  "127.0.0.1:2525",
+		IMAPListen:  "127.0.0.1:1143",
+		MaildirRoot: t.TempDir(),
+		Hostname:    "mail.example.test",
+		Users: map[string]User{
+			"alice@example.test": {Password: "secret"},
+		},
+	}
+	for _, test := range []struct {
+		name    string
+		plugins []PluginConfig
+	}{
+		{name: "empty name", plugins: []PluginConfig{{Config: map[string]string{"key": "value"}}}},
+		{name: "duplicate name", plugins: []PluginConfig{{Name: "same"}, {Name: "same"}}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			config := base
+			config.Plugins = test.plugins
+			if err := config.Validate(); err == nil {
+				t.Fatal("Validate() accepted invalid plugins")
+			}
+		})
+	}
+}
+
 func TestValidateRejectsDuplicateMailboxes(t *testing.T) {
 	tests := []struct {
 		name  string
@@ -235,6 +300,8 @@ func TestLoadYAMLEnvironmentExpansion(t *testing.T) {
 	t.Setenv("MYMAIL_PASSWORD", "secret-from-environment")
 	t.Setenv("MYMAIL_MAILBOX", "alice-from-environment")
 	t.Setenv("MYMAIL_ALIAS", "alias-from-environment@example.test")
+	t.Setenv("MYMAIL_PLUGIN_ENDPOINT", "https://expanded.example.test")
+	t.Setenv("MYMAIL_PLUGIN_TOKEN", "expanded-token")
 	path := filepath.Join(t.TempDir(), "config.yaml")
 	contents := []byte(`smtp_listen: ${MYMAIL_SMTP_LISTEN}
 smtp_cleartext_listen: ${MYMAIL_SMTP_CLEARTEXT_LISTEN}
@@ -244,6 +311,11 @@ tls_cert_file: ${MYMAIL_TLS_CERT}
 tls_key_file: ${MYMAIL_TLS_KEY}
 maildir_root: ${MYMAIL_ROOT}/mymail
 hostname: ${MYMAIL_HOSTNAME}
+plugins:
+  - name: test-plugin
+    config:
+      endpoint: ${MYMAIL_PLUGIN_ENDPOINT}
+      token: ${MYMAIL_PLUGIN_TOKEN}
 users:
   alice@example.test:
     password: ${MYMAIL_PASSWORD}
@@ -272,6 +344,10 @@ users:
 	}
 	if got.MaildirRoot != os.Getenv("MYMAIL_ROOT")+"/mymail" || got.Hostname != "mail.test" {
 		t.Fatalf("server settings = %#v", got)
+	}
+	pluginSettings := got.Plugins[0].Config
+	if pluginSettings["endpoint"] != "https://expanded.example.test" || pluginSettings["token"] != "expanded-token" {
+		t.Fatalf("expanded plugin settings = %#v", pluginSettings)
 	}
 	if !got.Authenticate("alice@example.test", "secret-from-environment") {
 		t.Fatal("Authenticate() rejected expanded password")

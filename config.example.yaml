@@ -36,6 +36,13 @@ auth_throttle:
 # Values may use environment variables, for example: ${HOME}/mymail
 maildir_root: /mnt/probox/@email
 hostname: leopard.thepratts.info
+# Plugins are initialized in list order. Each item names one plugin and may
+# supply string settings; setting values may use ${ENV_VAR} expansion.
+# plugins:
+#   - name: example-plugin
+#     config:
+#       endpoint: ${EXAMPLE_PLUGIN_ENDPOINT}
+#       token: ${EXAMPLE_PLUGIN_TOKEN}
 # Authenticated sessions may forward recipients at other domains to their MX host.
 users:
   kpratt@leopard.thepratts.info:
