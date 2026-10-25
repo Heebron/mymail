@@ -2,12 +2,23 @@ package main
 
 import (
 	"net/mail"
+	"os"
 	"strings"
 	"testing"
 )
 
+func testAddress(t *testing.T) string {
+	t.Helper()
+	address := os.Getenv("MYMAIL_TEST_ADDRESS")
+	if address == "" {
+		t.Fatal("MYMAIL_TEST_ADDRESS must be set before running tests")
+	}
+	return address
+}
+
 func TestBuildMessage(t *testing.T) {
-	from, err := mail.ParseAddress("kpratt@example.test")
+	address := testAddress(t)
+	from, err := mail.ParseAddress(address)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -22,7 +33,7 @@ func TestBuildMessage(t *testing.T) {
 	}
 	content := string(message)
 	for _, want := range []string{
-		"From: kpratt@example.test\r\n",
+		"From: " + address + "\r\n",
 		"To: bob@example.test\r\n",
 		"Subject: Test subject\r\n",
 		"Content-Type: text/plain; charset=UTF-8\r\n",
@@ -35,7 +46,7 @@ func TestBuildMessage(t *testing.T) {
 }
 
 func TestBuildMessageWithRecipients(t *testing.T) {
-	from, _ := mail.ParseAddress("kpratt@example.test")
+	from, _ := mail.ParseAddress(testAddress(t))
 	to, _ := mail.ParseAddress("bob@example.test")
 	cc, _ := mail.ParseAddress("carol@example.test")
 
@@ -68,7 +79,7 @@ func TestParseAddressesSupportsLists(t *testing.T) {
 }
 
 func TestBuildMessageRejectsHeaderInjection(t *testing.T) {
-	from, _ := mail.ParseAddress("kpratt@example.test")
+	from, _ := mail.ParseAddress(testAddress(t))
 	to, _ := mail.ParseAddress("bob@example.test")
 	if _, err := buildMessage(from, to, "bad\r\nBcc: attacker@example.test", "body"); err == nil {
 		t.Fatal("buildMessage accepted a subject containing a newline")

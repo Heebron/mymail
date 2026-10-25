@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -191,27 +192,44 @@ func TestValidateRejectsInvalidAuthThrottle(t *testing.T) {
 }
 
 func TestResolveAliasesToSharedMailbox(t *testing.T) {
+	testSender := os.Getenv("MYMAIL_TEST_SENDER")
+	if testSender == "" {
+		t.Fatal("MYMAIL_TEST_SENDER must be set before running tests")
+	}
+	testUsername := os.Getenv("MYMAIL_TEST_USERNAME")
+	if testUsername == "" {
+		t.Fatal("MYMAIL_TEST_USERNAME must be set before running tests")
+	}
+	testAddress := os.Getenv("MYMAIL_TEST_ADDRESS")
+	if testAddress == "" {
+		t.Fatal("MYMAIL_TEST_ADDRESS must be set before running tests")
+	}
+	_, testDomain, ok := strings.Cut(testAddress, "@")
+	if !ok || testDomain == "" {
+		t.Fatalf("MYMAIL_TEST_ADDRESS = %q, want an email address", testAddress)
+	}
+	alias := "alias@" + testDomain
 	config := Config{
-		Hostname: "leopard.thepratts.info",
+		Hostname: testDomain,
 		Users: map[string]User{
-			"kpratt@leopard.thepratts.info": {
+			testAddress: {
 				Password: "changeit",
-				Mailbox:  "kpratt",
-				Aliases:  []string{"kenpratt@comcast.net", "kpratt@thepratts.info", "stashcan@comcast.net"},
+				Mailbox:  testUsername,
+				Aliases:  []string{testSender, alias},
 			},
 		},
 	}
-	for _, address := range []string{"kenpratt@comcast.net", "kpratt@thepratts.info", "stashcan@comcast.net"} {
-		if mailbox, ok := config.Resolve(address); !ok || mailbox != "kpratt" {
-			t.Fatalf("Resolve(%q) = %q, %t; want kpratt, true", address, mailbox, ok)
+	for _, address := range []string{testSender, alias} {
+		if mailbox, ok := config.Resolve(address); !ok || mailbox != testUsername {
+			t.Fatalf("Resolve(%q) = %q, %t; want %s, true", address, mailbox, ok, testUsername)
 		}
 	}
-	for _, domain := range []string{"comcast.net", "thepratts.info"} {
+	for _, domain := range []string{testDomain} {
 		if !config.IsLocalDomain(domain) {
 			t.Fatalf("IsLocalDomain(%q) = false", domain)
 		}
 	}
-	if config.Authenticate("kenpratt@comcast.net", "changeit") {
+	if config.Authenticate(testSender, "changeit") {
 		t.Fatal("alias unexpectedly authenticated as a primary user")
 	}
 }

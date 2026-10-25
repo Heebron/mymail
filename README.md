@@ -63,6 +63,12 @@ make VERSION=v1.0.0 mymail
 ./mymail -version
 ```
 
+The Makefile also provides cross-compilation targets for Windows (`make
+windows`), macOS (`make mac`), Raspberry Pi (`make raspberry-pi`), and RISC-V
+(`make risc-v`). These targets indicate supported build platforms, but only
+the Linux build has been tested; the other platform builds have not yet been
+runtime-tested on their target systems.
+
 ### `systemd`
 
 Install the service unit, configuration, and binary:
@@ -159,8 +165,8 @@ go build -o mymail-send ./cmd/mymail-send
 Send a message through the default SMTP submission listener:
 
 ```sh
-./mymail-send -from kpratt@leopard.thepratts.info -to kpratt@leopard.thepratts.info \
-  -username kpratt@leopard.thepratts.info -password changeit
+./mymail-send -from user-4821@mail.example.test -to user-4821@mail.example.test \
+  -username user-4821@mail.example.test -password changeit
 ```
 
 The `-from` and `-to` options are required. Use `-server host:port` for
@@ -190,13 +196,13 @@ example:
 
 ```yaml
 users:
-  kpratt@leopard.thepratts.info:
+  user-4821@mail.example.test:
     password: changeit
-    mailbox: kpratt
+    mailbox: user-4821
     aliases:
-      - kenpratt@comcast.net
-      - kpratt@thepratts.info
-      - stashcan@comcast.net
+      - alias-7f2@example.test
+      - alias-19c@example.test
+      - alias-4a8@example.test
 ```
 
 Alias domains are treated as configured local domains, so unknown recipients
@@ -387,8 +393,14 @@ processors.
 Run the tests from this directory with:
 
 ```sh
+MYMAIL_TEST_SENDER=test-sender@example.test \
+MYMAIL_TEST_USERNAME=test-user \
+MYMAIL_TEST_ADDRESS=test-user@mail.example.test \
 GOWORK=off go test -race ./...
 ```
 
 `GOWORK=off` is needed when the parent directory has a Go workspace that does
-not include this standalone module.
+not include this standalone module. `MYMAIL_TEST_SENDER` supplies the sender
+address, while `MYMAIL_TEST_USERNAME` and `MYMAIL_TEST_ADDRESS` supply the
+test mailbox credentials without storing personal identifiers in the
+repository.

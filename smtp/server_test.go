@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -64,9 +65,13 @@ func (p *folderProcessor) Process(context.Context, *plugins.Message) (plugins.Re
 }
 
 func TestParseSMTPPathAcceptsESMTPParameters(t *testing.T) {
-	address, ok := parseSMTPPath("FROM:<kenpratt@comcast.net> BODY=8BITMIME", "FROM:")
-	if !ok || address != "kenpratt@comcast.net" {
-		t.Fatalf("parseSMTPPath() = %q, %t; want kenpratt@comcast.net, true", address, ok)
+	testSender := os.Getenv("MYMAIL_TEST_SENDER")
+	if testSender == "" {
+		t.Fatal("MYMAIL_TEST_SENDER must be set before running tests")
+	}
+	address, ok := parseSMTPPath("FROM:<"+testSender+"> BODY=8BITMIME", "FROM:")
+	if !ok || address != testSender {
+		t.Fatalf("parseSMTPPath() = %q, %t; want %s, true", address, ok, testSender)
 	}
 }
 
@@ -110,6 +115,18 @@ func TestSMTPAuthenticationResponseDelayIsBounded(t *testing.T) {
 }
 
 func TestSMTPDeliveryReachesResolvedInbox(t *testing.T) {
+	testSender := os.Getenv("MYMAIL_TEST_SENDER")
+	if testSender == "" {
+		t.Fatal("MYMAIL_TEST_SENDER must be set before running tests")
+	}
+	testUsername := os.Getenv("MYMAIL_TEST_USERNAME")
+	if testUsername == "" {
+		t.Fatal("MYMAIL_TEST_USERNAME must be set before running tests")
+	}
+	testAddress := os.Getenv("MYMAIL_TEST_ADDRESS")
+	if testAddress == "" {
+		t.Fatal("MYMAIL_TEST_ADDRESS must be set before running tests")
+	}
 	store, err := maildir.New(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
@@ -128,10 +145,10 @@ func TestSMTPDeliveryReachesResolvedInbox(t *testing.T) {
 		Store:      store,
 		Processors: processors,
 		Resolve: func(address string) (string, bool) {
-			return "kpratt", strings.EqualFold(address, "kpratt@leopard.thepratts.info")
+			return testUsername, strings.EqualFold(address, testAddress)
 		},
 		Authenticate: func(username, password string) bool {
-			return username == "kpratt" && password == "changeit"
+			return username == testUsername && password == "changeit"
 		},
 		Logger: slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelInfo})),
 	}
@@ -162,16 +179,16 @@ func TestSMTPDeliveryReachesResolvedInbox(t *testing.T) {
 	for i := 0; i < 5; i++ {
 		readLine()
 	}
-	credentials := base64.StdEncoding.EncodeToString([]byte("\x00kpratt\x00changeit"))
+	credentials := base64.StdEncoding.EncodeToString([]byte("\x00" + testUsername + "\x00changeit"))
 	write("AUTH PLAIN " + credentials)
 	if got := readLine(); !strings.HasPrefix(got, "235 ") {
 		t.Fatalf("AUTH response = %q", got)
 	}
-	write("MAIL FROM:<kenpratt@comcast.net> BODY=8BITMIME")
+	write("MAIL FROM:<" + testSender + "> BODY=8BITMIME")
 	if got := readLine(); !strings.HasPrefix(got, "250 ") {
 		t.Fatalf("MAIL response = %q", got)
 	}
-	write("RCPT TO:<kpratt@leopard.thepratts.info>")
+	write("RCPT TO:<" + testAddress + ">")
 	if got := readLine(); !strings.HasPrefix(got, "250 ") {
 		t.Fatalf("RCPT response = %q", got)
 	}
@@ -179,13 +196,13 @@ func TestSMTPDeliveryReachesResolvedInbox(t *testing.T) {
 	if got := readLine(); !strings.HasPrefix(got, "354 ") {
 		t.Fatalf("DATA response = %q", got)
 	}
-	write("From: kenpratt@comcast.net\r\nTo: kpratt@leopard.thepratts.info\r\nSubject: delivery test\r\n\r\nhello")
+	write("From: " + testSender + "\r\nTo: " + testAddress + "\r\nSubject: delivery test\r\n\r\nhello")
 	write(".")
 	if got := readLine(); !strings.HasPrefix(got, "250 ") {
 		t.Fatalf("delivery response = %q", got)
 	}
 
-	messages, err := store.List("kpratt")
+	messages, err := store.List(testUsername)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -200,11 +217,11 @@ func TestSMTPDeliveryReachesResolvedInbox(t *testing.T) {
 		`msg="SMTP action"`,
 		`command=AUTH`,
 		`msg="SMTP authentication"`,
-		`username=kpratt`,
+		`username=` + testUsername,
 		`success=true`,
 		`msg="SMTP message received"`,
-		`from=kenpratt@comcast.net`,
-		`to=[kpratt@leopard.thepratts.info]`,
+		`from=` + testSender,
+		`to=[` + testAddress + `]`,
 		`subject="delivery test"`,
 		`msg="SMTP message processed"`,
 		`decision=accept`,
@@ -500,6 +517,10 @@ func TestSMTPRejectsUnknownUserOnLocalDomain(t *testing.T) {
 }
 
 func TestSMTPStartTLS(t *testing.T) {
+	testUsername := os.Getenv("MYMAIL_TEST_USERNAME")
+	if testUsername == "" {
+		t.Fatal("MYMAIL_TEST_USERNAME must be set before running tests")
+	}
 	store, err := maildir.New(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
@@ -511,7 +532,7 @@ func TestSMTPStartTLS(t *testing.T) {
 		Store:           store,
 		Resolve:         func(string) (string, bool) { return "", false },
 		Authenticate: func(username, password string) bool {
-			return username == "kpratt" && password == "changeit"
+			return username == testUsername && password == "changeit"
 		},
 		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 	}
@@ -549,7 +570,7 @@ func TestSMTPStartTLS(t *testing.T) {
 	if containsLine(capabilities, "250-AUTH PLAIN LOGIN") {
 		t.Fatalf("plaintext capabilities advertise AUTH: %#v", capabilities)
 	}
-	writeLine("AUTH PLAIN " + base64.StdEncoding.EncodeToString([]byte("\x00kpratt\x00changeit")))
+	writeLine("AUTH PLAIN " + base64.StdEncoding.EncodeToString([]byte("\x00"+testUsername+"\x00changeit")))
 	if response := readLine(); !strings.HasPrefix(response, "530 ") {
 		t.Fatalf("plaintext AUTH response = %q", response)
 	}
@@ -582,7 +603,7 @@ func TestSMTPStartTLS(t *testing.T) {
 	if containsLine(secureCapabilities, "250-STARTTLS") {
 		t.Fatalf("TLS capabilities still advertise STARTTLS: %#v", secureCapabilities)
 	}
-	credentials := base64.StdEncoding.EncodeToString([]byte("\x00kpratt\x00changeit"))
+	credentials := base64.StdEncoding.EncodeToString([]byte("\x00" + testUsername + "\x00changeit"))
 	writeTLSLine("AUTH PLAIN " + credentials)
 	if response := readLine(); !strings.HasPrefix(response, "235 ") {
 		t.Fatalf("TLS AUTH response = %q", response)

@@ -37,6 +37,9 @@ separate development configuration and Maildir when running the server locally.
 
    ```sh
    gofmt -w <changed-go-files>
+   MYMAIL_TEST_SENDER=test-sender@example.test \
+   MYMAIL_TEST_USERNAME=test-user \
+   MYMAIL_TEST_ADDRESS=test-user@mail.example.test \
    go test -race ./...
    ```
 

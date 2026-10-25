@@ -20,6 +20,15 @@ import (
 	"mymail/maildir"
 )
 
+func testUsername(t *testing.T) string {
+	t.Helper()
+	username := os.Getenv("MYMAIL_TEST_USERNAME")
+	if username == "" {
+		t.Fatal("MYMAIL_TEST_USERNAME must be set before running tests")
+	}
+	return username
+}
+
 func TestListenSupportsPlainAndTLS(t *testing.T) {
 	tests := []struct {
 		name   string
@@ -153,6 +162,7 @@ func TestIMAPGreetingIncludesVersion(t *testing.T) {
 }
 
 func TestIMAPStartTLS(t *testing.T) {
+	username := testUsername(t)
 	store, err := maildir.New(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
@@ -162,9 +172,9 @@ func TestIMAPStartTLS(t *testing.T) {
 		StartTLSConfig:  testTLSConfig(t),
 		RequireSTARTTLS: true,
 		Store:           store,
-		Resolve:         func(username string) (string, bool) { return "kpratt", username == "kpratt" },
-		Authenticate: func(username, password string) bool {
-			return username == "kpratt" && password == "changeit"
+		Resolve:         func(login string) (string, bool) { return username, login == username },
+		Authenticate: func(login, password string) bool {
+			return login == username && password == "changeit"
 		},
 		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 	}
@@ -196,7 +206,7 @@ func TestIMAPStartTLS(t *testing.T) {
 	if !strings.Contains(capabilities, "STARTTLS") || strings.Contains(capabilities, "AUTH=PLAIN") || !strings.HasPrefix(readLine(), "a001 OK") {
 		t.Fatalf("plaintext capabilities = %q", capabilities)
 	}
-	writeLine("a002 LOGIN kpratt changeit")
+	writeLine(fmt.Sprintf("a002 LOGIN %s changeit", username))
 	if response := readLine(); !strings.HasPrefix(response, "a002 NO [PRIVACYREQUIRED]") {
 		t.Fatalf("plaintext LOGIN response = %q", response)
 	}
@@ -222,7 +232,7 @@ func TestIMAPStartTLS(t *testing.T) {
 	if strings.Contains(secureCapabilities, "STARTTLS") || !strings.Contains(secureCapabilities, "AUTH=PLAIN") || !strings.HasPrefix(readLine(), "a004 OK") {
 		t.Fatalf("TLS capabilities = %q", secureCapabilities)
 	}
-	writeTLSLine("a005 LOGIN kpratt changeit")
+	writeTLSLine(fmt.Sprintf("a005 LOGIN %s changeit", username))
 	if response := readLine(); !strings.HasPrefix(response, "a005 OK") {
 		t.Fatalf("TLS LOGIN response = %q", response)
 	}
@@ -237,6 +247,7 @@ func testTLSConfig(t *testing.T) *tls.Config {
 }
 
 func TestHandleAuthenticatePlain(t *testing.T) {
+	testUser := testUsername(t)
 	store, err := maildir.New(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
@@ -246,10 +257,10 @@ func TestHandleAuthenticatePlain(t *testing.T) {
 		Hostname: "mail.example.test",
 		Store:    store,
 		Resolve: func(username string) (string, bool) {
-			return "kpratt", strings.EqualFold(username, "kpratt")
+			return testUser, strings.EqualFold(username, testUser)
 		},
 		Authenticate: func(username, password string) bool {
-			return username == "kpratt" && password == "changeit"
+			return username == testUser && password == "changeit"
 		},
 		Logger: slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelInfo})),
 	}
@@ -283,7 +294,7 @@ func TestHandleAuthenticatePlain(t *testing.T) {
 	if challenge := readLine(); challenge != "+ " {
 		t.Fatalf("challenge = %q", challenge)
 	}
-	response := base64.StdEncoding.EncodeToString([]byte("\x00kpratt\x00changeit"))
+	response := base64.StdEncoding.EncodeToString([]byte("\x00" + testUser + "\x00changeit"))
 	writeLine(response)
 	if result := readLine(); !strings.HasPrefix(result, "a001 OK") {
 		t.Fatalf("authentication result = %q", result)
@@ -297,6 +308,7 @@ func TestHandleAuthenticatePlain(t *testing.T) {
 }
 
 func TestIdleReportsNewMessages(t *testing.T) {
+	testUser := testUsername(t)
 	store, err := maildir.New(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
@@ -306,10 +318,10 @@ func TestIdleReportsNewMessages(t *testing.T) {
 		Hostname: "mail.example.test",
 		Store:    store,
 		Resolve: func(username string) (string, bool) {
-			return "kpratt", strings.EqualFold(username, "kpratt")
+			return testUser, strings.EqualFold(username, testUser)
 		},
 		Authenticate: func(username, password string) bool {
-			return username == "kpratt" && password == "changeit"
+			return username == testUser && password == "changeit"
 		},
 		Logger: slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug})),
 	}
@@ -337,7 +349,7 @@ func TestIdleReportsNewMessages(t *testing.T) {
 	if greeting := readLine(); !strings.HasPrefix(greeting, "* OK") {
 		t.Fatalf("greeting = %q", greeting)
 	}
-	writeLine("a001 LOGIN kpratt changeit")
+	writeLine(fmt.Sprintf("a001 LOGIN %s changeit", testUser))
 	if result := readLine(); !strings.HasPrefix(result, "a001 OK") || !strings.Contains(result, " IDLE ") {
 		t.Fatalf("login result = %q", result)
 	}
@@ -349,10 +361,10 @@ func TestIdleReportsNewMessages(t *testing.T) {
 	if result := readLine(); result != "+ idling" {
 		t.Fatalf("idle result = %q", result)
 	}
-	if _, err := store.Deliver("kpratt", []byte("Subject: idle\r\n\r\nmessage\r\n")); err != nil {
+	if _, err := store.Deliver(testUser, []byte("Subject: idle\r\n\r\nmessage\r\n")); err != nil {
 		t.Fatal(err)
 	}
-	if messages, err := store.List("kpratt"); err != nil || len(messages) != 1 {
+	if messages, err := store.List(testUser); err != nil || len(messages) != 1 {
 		t.Fatalf("delivered messages = %d, error = %v", len(messages), err)
 	}
 	if err := clientConn.SetReadDeadline(time.Now().Add(2 * time.Second)); err != nil {
@@ -365,7 +377,7 @@ func TestIdleReportsNewMessages(t *testing.T) {
 	if recent := readLine(); recent != "* 1 RECENT" {
 		t.Fatalf("idle recent update = %q", recent)
 	}
-	messages, listErr := store.List("kpratt")
+	messages, listErr := store.List(testUser)
 	if listErr != nil || len(messages) != 1 || messages[0].Flags['S'] {
 		t.Fatalf("delivered message flags = %#v, error = %v; want unread", messages, listErr)
 	}
@@ -376,7 +388,7 @@ func TestIdleReportsNewMessages(t *testing.T) {
 	if result := readLine(); result != "a003 OK IDLE terminated" {
 		t.Fatalf("idle completion = %q", result)
 	}
-	if _, err := store.Deliver("kpratt", []byte("Subject: idle before command\r\n\r\nmessage\r\n")); err != nil {
+	if _, err := store.Deliver(testUser, []byte("Subject: idle before command\r\n\r\nmessage\r\n")); err != nil {
 		t.Fatal(err)
 	}
 	writeLine("a004 IDLE")
@@ -428,11 +440,13 @@ func TestIdleReportsFlagChanges(t *testing.T) {
 }
 
 func TestIMAPActionLoggingRedactsCredentials(t *testing.T) {
+	testUser := testUsername(t)
 	var logs bytes.Buffer
 	logger := slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelInfo}))
 
-	logger.Info("IMAP action", "remote_addr", "127.0.0.1:12345", "tag", "a001", "command", "LOGIN", "arguments", imapLogArguments("LOGIN", []string{"kpratt", "changeit"}), "username", "", "mailbox", "", "authenticated", false, "selected", false, "readonly", false)
-	logger.Info("IMAP action", "remote_addr", "127.0.0.1:12345", "tag", "a002", "command", "AUTHENTICATE", "arguments", imapLogArguments("AUTHENTICATE", []string{"PLAIN", "AGtwcmF0dABjaGFuZ2VpdA=="}), "username", "", "mailbox", "", "authenticated", false, "selected", false, "readonly", false)
+	encodedCredentials := base64.StdEncoding.EncodeToString([]byte("\x00" + testUser + "\x00changeit"))
+	logger.Info("IMAP action", "remote_addr", "127.0.0.1:12345", "tag", "a001", "command", "LOGIN", "arguments", imapLogArguments("LOGIN", []string{testUser, "changeit"}), "username", "", "mailbox", "", "authenticated", false, "selected", false, "readonly", false)
+	logger.Info("IMAP action", "remote_addr", "127.0.0.1:12345", "tag", "a002", "command", "AUTHENTICATE", "arguments", imapLogArguments("AUTHENTICATE", []string{"PLAIN", encodedCredentials}), "username", "", "mailbox", "", "authenticated", false, "selected", false, "readonly", false)
 
 	output := logs.String()
 	if !strings.Contains(output, "command=LOGIN") || !strings.Contains(output, "command=AUTHENTICATE") {
@@ -443,7 +457,7 @@ func TestIMAPActionLoggingRedactsCredentials(t *testing.T) {
 			t.Fatalf("action logs contain secret %q: %q", secret, output)
 		}
 	}
-	if !strings.Contains(output, "arguments=\"[kpratt [REDACTED]]\"") {
+	if !strings.Contains(output, fmt.Sprintf("arguments=\"[%s [REDACTED]]\"", testUser)) {
 		t.Fatalf("LOGIN arguments were not redacted: %q", output)
 	}
 	if !strings.Contains(output, "arguments=\"[PLAIN [REDACTED]]\"") {
@@ -452,6 +466,7 @@ func TestIMAPActionLoggingRedactsCredentials(t *testing.T) {
 }
 
 func TestHandleAppendLiteral(t *testing.T) {
+	testUser := testUsername(t)
 	store, err := maildir.New(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
@@ -460,10 +475,10 @@ func TestHandleAppendLiteral(t *testing.T) {
 		Hostname: "mail.example.test",
 		Store:    store,
 		Resolve: func(username string) (string, bool) {
-			return "kpratt", strings.EqualFold(username, "kpratt")
+			return testUser, strings.EqualFold(username, testUser)
 		},
 		Authenticate: func(username, password string) bool {
-			return username == "kpratt" && password == "changeit"
+			return username == testUser && password == "changeit"
 		},
 		Logger: slog.Default(),
 	}
@@ -493,7 +508,7 @@ func TestHandleAppendLiteral(t *testing.T) {
 	if greeting := readLine(); !strings.HasPrefix(greeting, "* OK") {
 		t.Fatalf("greeting = %q", greeting)
 	}
-	writeLine("a001 LOGIN kpratt changeit")
+	writeLine(fmt.Sprintf("a001 LOGIN %s changeit", testUser))
 	if result := readLine(); !strings.HasPrefix(result, "a001 OK") {
 		t.Fatalf("login result = %q", result)
 	}
@@ -525,7 +540,7 @@ func TestHandleAppendLiteral(t *testing.T) {
 		t.Fatalf("post-append NOOP result = %q", result)
 	}
 
-	messages, err := store.List("kpratt")
+	messages, err := store.List(testUser)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -552,6 +567,7 @@ func TestHandleAppendLiteral(t *testing.T) {
 }
 
 func TestHandleAppendVisibleThroughUIDRefresh(t *testing.T) {
+	testUser := testUsername(t)
 	store, err := maildir.New(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
@@ -560,10 +576,10 @@ func TestHandleAppendVisibleThroughUIDRefresh(t *testing.T) {
 		Hostname: "mail.example.test",
 		Store:    store,
 		Resolve: func(username string) (string, bool) {
-			return "kpratt", strings.EqualFold(username, "kpratt")
+			return testUser, strings.EqualFold(username, testUser)
 		},
 		Authenticate: func(username, password string) bool {
-			return username == "kpratt" && password == "changeit"
+			return username == testUser && password == "changeit"
 		},
 		Logger: slog.Default(),
 	}
@@ -593,7 +609,7 @@ func TestHandleAppendVisibleThroughUIDRefresh(t *testing.T) {
 	if greeting := readLine(); !strings.HasPrefix(greeting, "* OK") {
 		t.Fatalf("greeting = %q", greeting)
 	}
-	writeLine("a001 LOGIN kpratt changeit")
+	writeLine(fmt.Sprintf("a001 LOGIN %s changeit", testUser))
 	if result := readLine(); !strings.HasPrefix(result, "a001 OK") {
 		t.Fatalf("login result = %q", result)
 	}
@@ -624,7 +640,7 @@ func TestHandleAppendVisibleThroughUIDRefresh(t *testing.T) {
 	if result := readLine(); !strings.HasPrefix(result, "a004 OK") {
 		t.Fatalf("UID search completion = %q", result)
 	}
-	if _, err := store.Deliver("kpratt", []byte("From: second@example.test\r\nSubject: delivered\r\n\r\nsecond\r\n")); err != nil {
+	if _, err := store.Deliver(testUser, []byte("From: second@example.test\r\nSubject: delivered\r\n\r\nsecond\r\n")); err != nil {
 		t.Fatal(err)
 	}
 	writeLine("a004b UID SEARCH UID 2:*")
@@ -672,7 +688,7 @@ func TestHandleAppendVisibleThroughUIDRefresh(t *testing.T) {
 	if result := readLine(); !strings.HasPrefix(result, "a007 OK STORE") {
 		t.Fatalf("UID STORE clear completion = %q", result)
 	}
-	messages, err := store.List("kpratt")
+	messages, err := store.List(testUser)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1069,28 +1085,29 @@ func TestRecentMessageIsReportedToOnlyOneSession(t *testing.T) {
 }
 
 func TestCopyAndUIDExpunge(t *testing.T) {
+	testUser := testUsername(t)
 	store, err := maildir.New(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.Deliver("kpratt", []byte("Subject: first\r\n\r\nfirst\r\n")); err != nil {
+	if _, err := store.Deliver(testUser, []byte("Subject: first\r\n\r\nfirst\r\n")); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.Deliver("kpratt", []byte("Subject: second\r\n\r\nsecond\r\n")); err != nil {
+	if _, err := store.Deliver(testUser, []byte("Subject: second\r\n\r\nsecond\r\n")); err != nil {
 		t.Fatal(err)
 	}
-	messages, err := store.List("kpratt")
+	messages, err := store.List(testUser)
 	if err != nil {
 		t.Fatal(err)
 	}
 	deleted := messages[0]
 	deleted.Flags['D'] = true
-	if _, err := store.SetFlags("kpratt", deleted, deleted.Flags); err != nil {
+	if _, err := store.SetFlags(testUser, deleted, deleted.Flags); err != nil {
 		t.Fatal(err)
 	}
 
 	server := &Server{Store: store}
-	state := &session{mailbox: "kpratt", selected: true}
+	state := &session{mailbox: testUser, selected: true}
 	var responses []string
 	write := func(format string, args ...any) error {
 		responses = append(responses, fmt.Sprintf(format, args...))
@@ -1105,7 +1122,7 @@ func TestCopyAndUIDExpunge(t *testing.T) {
 	if len(responses) != 2 || responses[0] != "* 1 EXPUNGE" || responses[1] != "a002 OK UID EXPUNGE completed" {
 		t.Fatalf("expunge responses = %#v", responses)
 	}
-	remaining, err := store.List("kpratt")
+	remaining, err := store.List(testUser)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1139,19 +1156,20 @@ func TestExpungeSequenceTracksAnnouncedRemoval(t *testing.T) {
 }
 
 func TestCopyToSlashQualifiedFolder(t *testing.T) {
+	testUser := testUsername(t)
 	store, err := maildir.New(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.Deliver("kpratt", []byte("Subject: source\r\n\r\nbody\r\n")); err != nil {
+	if _, err := store.Deliver(testUser, []byte("Subject: source\r\n\r\nbody\r\n")); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.Ensure("kpratt/BitcoinLayer"); err != nil {
+	if err := store.Ensure(testUser + "/BitcoinLayer"); err != nil {
 		t.Fatal(err)
 	}
 
 	server := &Server{Store: store}
-	state := &session{rootMailbox: "kpratt", mailbox: "kpratt", selected: true}
+	state := &session{rootMailbox: testUser, mailbox: testUser, selected: true}
 	var responses []string
 	write := func(format string, args ...any) error {
 		responses = append(responses, fmt.Sprintf(format, args...))
@@ -1161,7 +1179,7 @@ func TestCopyToSlashQualifiedFolder(t *testing.T) {
 	if len(responses) != 1 || responses[0] != "a001 OK COPY completed" {
 		t.Fatalf("copy responses = %#v", responses)
 	}
-	messages, err := store.List("kpratt/BitcoinLayer")
+	messages, err := store.List(testUser + "/BitcoinLayer")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1171,26 +1189,28 @@ func TestCopyToSlashQualifiedFolder(t *testing.T) {
 }
 
 func TestNestedInboxFolderMailboxResolution(t *testing.T) {
-	mailbox, ok := resolveMailbox("kpratt", "INBOX/Projects/2026")
-	if !ok || mailbox != "kpratt/Projects.2026" {
-		t.Fatalf("resolved mailbox = %q, %v; want kpratt/Projects.2026, true", mailbox, ok)
+	testUser := testUsername(t)
+	mailbox, ok := resolveMailbox(testUser, "INBOX/Projects/2026")
+	if !ok || mailbox != testUser+"/Projects.2026" {
+		t.Fatalf("resolved mailbox = %q, %v; want %s/Projects.2026, true", mailbox, ok, testUser)
 	}
-	if _, ok := resolveMailbox("kpratt", "INBOX/Projects//2026"); ok {
+	if _, ok := resolveMailbox(testUser, "INBOX/Projects//2026"); ok {
 		t.Fatal("empty nested folder component was accepted")
 	}
 }
 
 func TestListAdvertisesTopLevelFolder(t *testing.T) {
+	testUser := testUsername(t)
 	store, err := maildir.New(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := store.Ensure("kpratt/Cigna"); err != nil {
+	if err := store.Ensure(testUser + "/Cigna"); err != nil {
 		t.Fatal(err)
 	}
 
 	server := &Server{Store: store}
-	state := &session{rootMailbox: "kpratt", authenticated: true}
+	state := &session{rootMailbox: testUser, authenticated: true}
 	var response bytes.Buffer
 	writer := bufio.NewWriter(&response)
 	server.listMailboxes("a001", []string{"", "*"}, state, writer, "LIST")
@@ -1201,6 +1221,7 @@ func TestListAdvertisesTopLevelFolder(t *testing.T) {
 }
 
 func TestStatusQuotesMailboxWithSpaces(t *testing.T) {
+	testUser := testUsername(t)
 	store, err := maildir.New(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
@@ -1209,10 +1230,10 @@ func TestStatusQuotesMailboxWithSpaces(t *testing.T) {
 		Hostname: "mail.example.test",
 		Store:    store,
 		Resolve: func(username string) (string, bool) {
-			return "kpratt", strings.EqualFold(username, "kpratt")
+			return testUser, strings.EqualFold(username, testUser)
 		},
 		Authenticate: func(username, password string) bool {
-			return username == "kpratt" && password == "changeit"
+			return username == testUser && password == "changeit"
 		},
 		Logger: slog.Default(),
 	}
@@ -1240,7 +1261,7 @@ func TestStatusQuotesMailboxWithSpaces(t *testing.T) {
 	}
 
 	readLine()
-	writeLine("a001 LOGIN kpratt changeit")
+	writeLine(fmt.Sprintf("a001 LOGIN %s changeit", testUser))
 	if result := readLine(); !strings.HasPrefix(result, "a001 OK") {
 		t.Fatalf("login result = %q", result)
 	}
@@ -1313,6 +1334,7 @@ func TestSelectReportsRecentMessages(t *testing.T) {
 }
 
 func TestCreateListAndSelectFolder(t *testing.T) {
+	testUser := testUsername(t)
 	store, err := maildir.New(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
@@ -1321,10 +1343,10 @@ func TestCreateListAndSelectFolder(t *testing.T) {
 		Hostname: "mail.example.test",
 		Store:    store,
 		Resolve: func(username string) (string, bool) {
-			return "kpratt", strings.EqualFold(username, "kpratt")
+			return testUser, strings.EqualFold(username, testUser)
 		},
 		Authenticate: func(username, password string) bool {
-			return username == "kpratt" && password == "changeit"
+			return username == testUser && password == "changeit"
 		},
 		Logger: slog.Default(),
 	}
@@ -1352,7 +1374,7 @@ func TestCreateListAndSelectFolder(t *testing.T) {
 	}
 
 	readLine()
-	writeLine("a001 LOGIN kpratt changeit")
+	writeLine(fmt.Sprintf("a001 LOGIN %s changeit", testUser))
 	if result := readLine(); !strings.HasPrefix(result, "a001 OK") {
 		t.Fatalf("login result = %q", result)
 	}
@@ -1396,14 +1418,14 @@ func TestCreateListAndSelectFolder(t *testing.T) {
 	if result := readLine(); result != "a010 OK DELETE completed" {
 		t.Fatalf("delete result = %q", result)
 	}
-	if folders, err := store.ListMailboxes("kpratt"); err != nil || len(folders) != 1 || folders[0] != "Projects" {
+	if folders, err := store.ListMailboxes(testUser); err != nil || len(folders) != 1 || folders[0] != "Projects" {
 		t.Fatalf("remaining folders after delete = %#v, error = %v", folders, err)
 	}
 	writeLine("a011 DELETE Projects")
 	if result := readLine(); result != "a011 OK DELETE completed" {
 		t.Fatalf("second delete result = %q", result)
 	}
-	if folders, err := store.ListMailboxes("kpratt"); err != nil || len(folders) != 0 {
+	if folders, err := store.ListMailboxes(testUser); err != nil || len(folders) != 0 {
 		t.Fatalf("remaining folders after second delete = %#v, error = %v", folders, err)
 	}
 }
