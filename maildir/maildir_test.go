@@ -3,10 +3,38 @@ package maildir
 import (
 	"bytes"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
 )
+
+func TestMailboxPathIsAbsolute(t *testing.T) {
+	tempRoot := t.TempDir()
+	workingDir, err := filepath.Abs(".")
+	if err != nil {
+		t.Fatal(err)
+	}
+	relativeRoot, err := filepath.Rel(workingDir, tempRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, err := New(relativeRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path, err := store.MailboxPath("alice")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !filepath.IsAbs(path) {
+		t.Fatalf("mailbox path = %q, want absolute path", path)
+	}
+	want := filepath.Join(tempRoot, "alice", "Maildir")
+	if path != want {
+		t.Fatalf("mailbox path = %q, want %q", path, want)
+	}
+}
 
 func TestDeliverListReadAndFlags(t *testing.T) {
 	store, err := New(t.TempDir())

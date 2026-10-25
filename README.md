@@ -246,7 +246,8 @@ password data.
 ## SMTP processors
 
 Processors implement `plugins.Processor` and are run in registration order
-after the SMTP message has been read and before it is delivered. MyMail calls
+after a message with a local delivery destination has been read and before it
+is delivered. Forwarded-only messages bypass the processor chain. MyMail calls
 `Initialize` for every registered processor before opening the mail listeners;
 an initialization error is logged as a warning and that processor is omitted
 from processing. A processor can update `Message.Data` and set `Message.Folder`
@@ -256,6 +257,10 @@ Maildir++ folder:
 ```go
 spamFilter := plugins.NewKeywordSpamFilter("buy now", "free money", "viagra")
 ```
+
+For locally delivered messages, `Message.Maildir` contains the absolute path
+to the first resolved user's Maildir directory. It is empty for messages that
+only have forwarded recipients.
 
 Register processors on the chain before starting the listeners:
 

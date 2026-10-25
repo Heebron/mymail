@@ -39,10 +39,14 @@ func New(root string) (*Store, error) {
 	if root == "" {
 		return nil, errors.New("maildir root is empty")
 	}
-	if err := os.MkdirAll(root, 0700); err != nil {
+	absoluteRoot, err := filepath.Abs(root)
+	if err != nil {
+		return nil, fmt.Errorf("resolve maildir root: %w", err)
+	}
+	if err := os.MkdirAll(absoluteRoot, 0700); err != nil {
 		return nil, fmt.Errorf("create maildir root: %w", err)
 	}
-	return &Store{Root: root}, nil
+	return &Store{Root: absoluteRoot}, nil
 }
 
 func (s *Store) mailboxPath(user string) (string, error) {
@@ -58,6 +62,15 @@ func (s *Store) mailboxPath(user string) (string, error) {
 		path = filepath.Join(path, "."+parts[1])
 	}
 	return path, nil
+}
+
+// MailboxPath returns the absolute Maildir directory for a user.
+func (s *Store) MailboxPath(user string) (string, error) {
+	path, err := s.mailboxPath(user)
+	if err != nil {
+		return "", err
+	}
+	return filepath.Abs(path)
 }
 
 func validMailboxPart(value string) bool {

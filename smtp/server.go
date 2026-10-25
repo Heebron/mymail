@@ -123,6 +123,21 @@ type transaction struct {
 	forward    []string
 }
 
+func (s *Server) pluginMessage(tx transaction, data []byte, remoteAddr string) *plugins.Message {
+	message := &plugins.Message{
+		Data:       data,
+		From:       tx.from,
+		Recipients: append([]string(nil), tx.recipients...),
+		Metadata:   map[string]string{"peer": remoteAddr},
+	}
+	if len(tx.mailboxes) > 0 && s.Store != nil {
+		if path, err := s.Store.MailboxPath(tx.mailboxes[0]); err == nil {
+			message.Maildir = path
+		}
+	}
+	return message
+}
+
 func (s *Server) handle(ctx context.Context, conn net.Conn) {
 	defer conn.Close()
 	logger := s.logger()
@@ -293,12 +308,14 @@ func (s *Server) handle(ctx context.Context, conn net.Conn) {
 				continue
 			}
 			logger.Info("SMTP message received", "remote_addr", remoteAddr, "from", tx.from, "to", tx.recipients, "subject", messageSubject(data), "sender", tx.from, "recipients", len(tx.recipients), "bytes", len(data))
-			message := &plugins.Message{Data: data, From: tx.from, Recipients: append([]string(nil), tx.recipients...), Metadata: map[string]string{"peer": remoteAddr}}
+			message := s.pluginMessage(tx, data, remoteAddr)
 			result := plugins.Result{Decision: plugins.Accept}
-			if s.Processors != nil {
-				result = s.Processors.Process(ctx, message)
+			if len(tx.mailboxes) > 0 {
+				if s.Processors != nil {
+					result = s.Processors.Process(ctx, message)
+				}
+				logger.Info("SMTP message processed", "remote_addr", remoteAddr, "decision", decisionName(result.Decision), "reason", cleanReason(result.Reason, ""))
 			}
-			logger.Info("SMTP message processed", "remote_addr", remoteAddr, "decision", decisionName(result.Decision), "reason", cleanReason(result.Reason, ""))
 			switch result.Decision {
 			case plugins.Reject:
 				logger.Warn("SMTP message rejected", "remote_addr", remoteAddr, "reason", cleanReason(result.Reason, "message rejected"))

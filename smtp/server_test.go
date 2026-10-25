@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -22,6 +23,36 @@ import (
 
 type folderProcessor struct {
 	folder string
+}
+
+type countingProcessor struct {
+	calls int
+}
+
+func (p *countingProcessor) Name() string { return "counting" }
+
+func (p *countingProcessor) Initialize(context.Context) error { return nil }
+
+func (p *countingProcessor) Process(context.Context, *plugins.Message) (plugins.Result, error) {
+	p.calls++
+	return plugins.Result{Decision: plugins.Accept}, nil
+}
+
+func TestPluginMessageIncludesAbsoluteUserMaildir(t *testing.T) {
+	root := t.TempDir()
+	store, err := maildir.New(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := &Server{Store: store}
+	message := server.pluginMessage(transaction{mailboxes: []string{"alice"}}, []byte("message"), "192.0.2.1:25")
+	want := filepath.Join(root, "alice", "Maildir")
+	if message.Maildir != want {
+		t.Fatalf("plugin Maildir = %q, want %q", message.Maildir, want)
+	}
+	if !filepath.IsAbs(message.Maildir) {
+		t.Fatalf("plugin Maildir = %q, want absolute path", message.Maildir)
+	}
 }
 
 func (p *folderProcessor) Name() string { return "folder" }
@@ -84,9 +115,18 @@ func TestSMTPDeliveryReachesResolvedInbox(t *testing.T) {
 		t.Fatal(err)
 	}
 	var logs bytes.Buffer
+	processors := plugins.New()
+	processor := &countingProcessor{}
+	if err := processors.Add(processor); err != nil {
+		t.Fatal(err)
+	}
+	if failures := processors.Initialize(context.Background()); len(failures) != 0 {
+		t.Fatalf("processor initialization failures = %#v", failures)
+	}
 	server := &Server{
-		Hostname: "mail.example.test",
-		Store:    store,
+		Hostname:   "mail.example.test",
+		Store:      store,
+		Processors: processors,
 		Resolve: func(address string) (string, bool) {
 			return "kpratt", strings.EqualFold(address, "kpratt@leopard.thepratts.info")
 		},
@@ -151,6 +191,9 @@ func TestSMTPDeliveryReachesResolvedInbox(t *testing.T) {
 	}
 	if len(messages) != 1 {
 		t.Fatalf("inbox messages = %d, want 1", len(messages))
+	}
+	if processor.calls != 1 {
+		t.Fatalf("local message invoked %d processors, want 1", processor.calls)
 	}
 	output := logs.String()
 	for _, expected := range []string{
@@ -221,9 +264,18 @@ func TestSMTPDeliveryForwardsUnknownDomainToMX(t *testing.T) {
 		t.Fatal(err)
 	}
 	var logs bytes.Buffer
+	processors := plugins.New()
+	processor := &countingProcessor{}
+	if err := processors.Add(processor); err != nil {
+		t.Fatal(err)
+	}
+	if failures := processors.Initialize(context.Background()); len(failures) != 0 {
+		t.Fatalf("processor initialization failures = %#v", failures)
+	}
 	server := &Server{
-		Hostname: "mail.local.test",
-		Store:    store,
+		Hostname:   "mail.local.test",
+		Store:      store,
+		Processors: processors,
 		Resolve: func(address string) (string, bool) {
 			return "alice", strings.EqualFold(address, "alice@local.test")
 		},
@@ -346,6 +398,9 @@ func TestSMTPDeliveryForwardsUnknownDomainToMX(t *testing.T) {
 	}
 	if !strings.Contains(relayed.String(), "..dot-stuffed\r\n") || !strings.Contains(relayed.String(), "Subject: relay test") {
 		t.Fatalf("relayed message = %q", relayed.String())
+	}
+	if processor.calls != 0 {
+		t.Fatalf("forward-only message invoked %d processors, want 0", processor.calls)
 	}
 	output := logs.String()
 	for _, expected := range []string{`route=forward`, `msg="SMTP forwarding attempt"`, `msg="SMTP forwarding completed"`} {

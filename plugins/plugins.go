@@ -22,6 +22,7 @@ type Message struct {
 	From       string
 	Recipients []string
 	Metadata   map[string]string
+	Maildir    string
 	Folder     string
 }
 
