@@ -9,6 +9,8 @@
 !auth/**
 !config/
 !config/**
+!health/
+!health/**
 !imap/
 !imap/**
 !logging/
