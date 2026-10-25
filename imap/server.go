@@ -27,7 +27,10 @@ import (
 	"mymail/maildir"
 )
 
+// Resolver maps an authenticated username to a mailbox name.
 type Resolver func(username string) (mailbox string, ok bool)
+
+// Authenticator verifies IMAP login credentials.
 type Authenticator func(username, password string) bool
 
 var (
@@ -35,26 +38,42 @@ var (
 	errAuthenticationCancelled = errors.New("authentication cancelled")
 )
 
+// Server serves IMAP4rev1 requests backed by a Maildir store.
 type Server struct {
-	Addr            string
-	TLSConfig       *tls.Config
-	StartTLSConfig  *tls.Config
+	// Addr is the TCP address to listen on.
+	Addr string
+	// TLSConfig enables implicit TLS when non-nil.
+	TLSConfig *tls.Config
+	// StartTLSConfig enables STARTTLS on a cleartext listener when non-nil.
+	StartTLSConfig *tls.Config
+	// RequireSTARTTLS blocks authentication until TLS is active.
 	RequireSTARTTLS bool
-	Hostname        string
-	Version         string
-	Store           *maildir.Store
-	Resolve         Resolver
-	Authenticate    Authenticator
-	AuthLimiter     *auth.Limiter
-	Logger          *slog.Logger
-	OnReady         func()
-	recentMu        sync.Mutex
-	recentClaims    map[string]map[uint32]struct{}
-	activeMu        sync.Mutex
-	active          map[net.Conn]struct{}
-	activeWG        sync.WaitGroup
+	// Hostname is the name used in the IMAP greeting.
+	Hostname string
+	// Version is reported in the server capability and ID responses.
+	Version string
+	// Store provides mailbox and message operations.
+	Store *maildir.Store
+	// Resolve maps usernames to mailbox names.
+	Resolve Resolver
+	// Authenticate verifies login credentials.
+	Authenticate Authenticator
+	// AuthLimiter applies shared authentication throttling when non-nil.
+	AuthLimiter *auth.Limiter
+	// Logger receives structured service logs. The default logger is used when
+	// it is nil.
+	Logger *slog.Logger
+	// OnReady is called after the listener starts accepting connections.
+	OnReady      func()
+	recentMu     sync.Mutex
+	recentClaims map[string]map[uint32]struct{}
+	activeMu     sync.Mutex
+	active       map[net.Conn]struct{}
+	activeWG     sync.WaitGroup
 }
 
+// ListenAndServe listens until ctx is canceled or the listener fails. Active
+// connections are closed during shutdown before the method returns.
 func (s *Server) ListenAndServe(ctx context.Context) error {
 	if s.Store == nil || s.Resolve == nil || s.Authenticate == nil {
 		return errors.New("imap server requires store, resolver, and authenticator")

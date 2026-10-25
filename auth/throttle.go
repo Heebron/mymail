@@ -11,21 +11,37 @@ import (
 )
 
 var (
-	ErrBackoff         = errors.New("authentication temporarily blocked")
+	// ErrBackoff indicates that authentication is temporarily blocked for the
+	// connection's source IP or account.
+	ErrBackoff = errors.New("authentication temporarily blocked")
+	// ErrConnectionLimit indicates that the connection has used all allowed
+	// authentication attempts.
 	ErrConnectionLimit = errors.New("authentication connection limit exceeded")
 )
 
+// Config controls the shared SMTP and IMAP authentication limiter.
 type Config struct {
-	MaxAttemptsPerConnection int           `yaml:"max_attempts_per_connection"`
-	MaxFailuresPerIP         int           `yaml:"max_failures_per_ip"`
-	MaxFailuresPerAccount    int           `yaml:"max_failures_per_account"`
-	BackoffBase              time.Duration `yaml:"backoff_base"`
-	BackoffMax               time.Duration `yaml:"backoff_max"`
-	ResponseDelayMax         time.Duration `yaml:"response_delay_max"`
-	FailureWindow            time.Duration `yaml:"failure_window"`
-	Logger                   *slog.Logger  `yaml:"-"`
+	// MaxAttemptsPerConnection is the maximum number of checks on one
+	// connection.
+	MaxAttemptsPerConnection int `yaml:"max_attempts_per_connection"`
+	// MaxFailuresPerIP is the failure threshold tracked for each source IP.
+	MaxFailuresPerIP int `yaml:"max_failures_per_ip"`
+	// MaxFailuresPerAccount is the failure threshold tracked for each account.
+	MaxFailuresPerAccount int `yaml:"max_failures_per_account"`
+	// BackoffBase is the delay after the first failed authentication.
+	BackoffBase time.Duration `yaml:"backoff_base"`
+	// BackoffMax is the largest delay used after a failed authentication.
+	BackoffMax time.Duration `yaml:"backoff_max"`
+	// ResponseDelayMax caps the delay returned to the protocol server.
+	ResponseDelayMax time.Duration `yaml:"response_delay_max"`
+	// FailureWindow is how long failure state remains active without a new
+	// failure.
+	FailureWindow time.Duration `yaml:"failure_window"`
+	// Logger receives structured throttle decisions. It is not serialized.
+	Logger *slog.Logger `yaml:"-"`
 }
 
+// DefaultConfig returns the default authentication-throttling limits.
 func DefaultConfig() Config {
 	return Config{
 		MaxAttemptsPerConnection: 5,
@@ -38,6 +54,8 @@ func DefaultConfig() Config {
 	}
 }
 
+// Limiter tracks authentication failures by connection, source IP, and
+// normalized account name. It is safe for concurrent use.
 type Limiter struct {
 	config   Config
 	logger   *slog.Logger
@@ -53,6 +71,8 @@ type failureState struct {
 	blockedUntil time.Time
 }
 
+// NewLimiter creates a limiter. Non-positive limits use their default values;
+// BackoffMax is raised to BackoffBase when necessary.
 func NewLimiter(config Config) *Limiter {
 	defaults := DefaultConfig()
 	if config.MaxAttemptsPerConnection <= 0 {
@@ -88,16 +108,19 @@ func NewLimiter(config Config) *Limiter {
 	}
 }
 
+// Connection tracks authentication attempts made on one network connection.
 type Connection struct {
 	limiter  *Limiter
 	ip       string
 	attempts int
 }
 
+// NewConnection creates a connection tracker for a remote address.
 func (l *Limiter) NewConnection(remoteAddr string) *Connection {
 	return &Connection{limiter: l, ip: normalizeIP(remoteAddr)}
 }
 
+// Allow reports whether another authentication check may run.
 func (c *Connection) Allow(account string) error {
 	if c == nil || c.limiter == nil {
 		return nil
@@ -135,6 +158,8 @@ func (c *Connection) Allow(account string) error {
 	return nil
 }
 
+// Failure records a failed authentication and returns the bounded response
+// delay that the protocol server should apply.
 func (c *Connection) Failure(account string) time.Duration {
 	if c == nil || c.limiter == nil {
 		return 0
@@ -150,6 +175,7 @@ func (c *Connection) Failure(account string) time.Duration {
 	return l.responseDelay(now, ipState, accountState)
 }
 
+// Success clears failure state for the connection's source IP and account.
 func (c *Connection) Success(account string) {
 	if c == nil || c.limiter == nil {
 		return

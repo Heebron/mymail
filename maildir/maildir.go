@@ -15,26 +15,37 @@ import (
 	"time"
 )
 
+// ErrInvalidMailbox indicates that a mailbox or folder name is unsafe or
+// malformed.
 var ErrInvalidMailbox = errors.New("invalid mailbox name")
 
 // Message is the metadata needed by the IMAP server for one Maildir message.
 type Message struct {
+	// InternalDate is the message's filesystem or delivery timestamp.
 	InternalDate time.Time
-	Flags        map[byte]bool
-	Filename     string
-	Path         string
-	Size         int64
-	UID          uint32
-	Recent       bool
+	// Flags contains the standard Maildir flags found in the filename.
+	Flags map[byte]bool
+	// Filename is the message's name within its Maildir directory.
+	Filename string
+	// Path is the absolute path used to read or delete the message.
+	Path string
+	// Size is the message size in bytes.
+	Size int64
+	// UID is the stable IMAP UID assigned by the store.
+	UID uint32
+	// Recent reports whether the message was found in Maildir's new directory.
+	Recent bool
 }
 
 // Store manages mailboxes below Root. A Maildir write is committed with one
 // rename, so readers never observe a partially written message.
 type Store struct {
+	// Root is the absolute directory containing user Maildirs.
 	Root  string
 	locks sync.Map // mailbox name -> *sync.RWMutex
 }
 
+// New creates a store and ensures that its root directory exists.
 func New(root string) (*Store, error) {
 	if root == "" {
 		return nil, errors.New("maildir root is empty")
@@ -621,6 +632,8 @@ func cloneFlags(flags map[byte]bool) map[byte]bool {
 	return theCopy
 }
 
+// Delete removes a message by its snapshot path. It ignores an already
+// removed file and does not acquire a mailbox lock.
 func (s *Store) Delete(message Message) error {
 	if err := os.Remove(message.Path); err != nil && !os.IsNotExist(err) {
 		return err

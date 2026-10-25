@@ -13,29 +13,52 @@ import (
 	"mymail/auth"
 )
 
+// User contains one login account, its mailbox mapping, and aliases.
 type User struct {
-	Password       string   `yaml:"password,omitempty"`
-	PasswordSHA256 string   `yaml:"password_sha256,omitempty"`
-	Mailbox        string   `yaml:"mailbox,omitempty"`
-	Aliases        []string `yaml:"aliases,omitempty"`
+	// Password is a cleartext password. Prefer PasswordSHA256 in deployments.
+	Password string `yaml:"password,omitempty"`
+	// PasswordSHA256 is a lowercase hexadecimal SHA-256 password hash.
+	PasswordSHA256 string `yaml:"password_sha256,omitempty"`
+	// Mailbox is the directory name below maildir_root. It defaults to the
+	// configured username.
+	Mailbox string `yaml:"mailbox,omitempty"`
+	// Aliases route additional recipient addresses to this user's mailbox.
+	Aliases []string `yaml:"aliases,omitempty"`
 }
 
+// Config is the validated YAML configuration for the MyMail daemon.
 type Config struct {
-	SMTPListen          string          `yaml:"smtp_listen"`
-	SMTPCleartextListen string          `yaml:"smtp_cleartext_listen,omitempty"`
-	SMTPRequireSTARTTLS bool            `yaml:"smtp_require_starttls,omitempty"`
-	IMAPListen          string          `yaml:"imap_listen"`
-	IMAPTLSListen       string          `yaml:"imap_tls_listen,omitempty"`
-	IMAPRequireSTARTTLS bool            `yaml:"imap_require_starttls,omitempty"`
-	TLSCertFile         string          `yaml:"tls_cert_file,omitempty"`
-	TLSKeyFile          string          `yaml:"tls_key_file,omitempty"`
-	AuthThrottle        auth.Config     `yaml:"auth_throttle"`
-	MaildirRoot         string          `yaml:"maildir_root"`
-	Hostname            string          `yaml:"hostname"`
-	HealthListen        string          `yaml:"health_listen"`
-	Users               map[string]User `yaml:"users"`
+	// SMTPListen is the STARTTLS-capable SMTP listener address.
+	SMTPListen string `yaml:"smtp_listen"`
+	// SMTPCleartextListen is the optional cleartext SMTP listener address.
+	SMTPCleartextListen string `yaml:"smtp_cleartext_listen,omitempty"`
+	// SMTPRequireSTARTTLS requires TLS before SMTP authentication or MAIL.
+	SMTPRequireSTARTTLS bool `yaml:"smtp_require_starttls,omitempty"`
+	// IMAPListen is the cleartext IMAP listener address, optionally with
+	// STARTTLS.
+	IMAPListen string `yaml:"imap_listen"`
+	// IMAPTLSListen is the optional implicit-TLS IMAP listener address.
+	IMAPTLSListen string `yaml:"imap_tls_listen,omitempty"`
+	// IMAPRequireSTARTTLS requires TLS before IMAP authentication.
+	IMAPRequireSTARTTLS bool `yaml:"imap_require_starttls,omitempty"`
+	// TLSCertFile and TLSKeyFile identify the certificate pair used by TLS
+	// listeners.
+	TLSCertFile string `yaml:"tls_cert_file,omitempty"`
+	TLSKeyFile  string `yaml:"tls_key_file,omitempty"`
+	// AuthThrottle configures shared authentication limits.
+	AuthThrottle auth.Config `yaml:"auth_throttle"`
+	// MaildirRoot contains the per-user Maildir directories.
+	MaildirRoot string `yaml:"maildir_root"`
+	// Hostname is used in protocol greetings and outbound SMTP EHLO.
+	Hostname string `yaml:"hostname"`
+	// HealthListen is the address serving /healthz and /readyz.
+	HealthListen string `yaml:"health_listen"`
+	// Users maps login addresses to mailbox and authentication settings.
+	Users map[string]User `yaml:"users"`
 }
 
+// Defaults returns the configuration defaults used before YAML values are
+// applied.
 func Defaults() Config {
 	return Config{
 		SMTPListen:          "0.0.0.0:587",
@@ -49,6 +72,7 @@ func Defaults() Config {
 	}
 }
 
+// Load reads, expands, and validates a YAML configuration file.
 func Load(path string) (Config, error) {
 	config := Defaults()
 	data, err := os.ReadFile(path)
@@ -95,6 +119,7 @@ func expandEnvironment(value string) string {
 	})
 }
 
+// Validate checks listener, TLS, authentication, mailbox, and user settings.
 func (c *Config) Validate() error {
 	if strings.TrimSpace(c.SMTPListen) == "" || strings.TrimSpace(c.IMAPListen) == "" {
 		return errors.New("smtp_listen and imap_listen are required")
@@ -183,6 +208,7 @@ func validateAuthThrottle(throttle auth.Config) error {
 	return nil
 }
 
+// Resolve maps a login or recipient address, including aliases, to a mailbox.
 func (c *Config) Resolve(username string) (string, bool) {
 	user, ok := c.findUser(username)
 	if ok {
@@ -199,6 +225,8 @@ func (c *Config) Resolve(username string) (string, bool) {
 	return "", false
 }
 
+// IsLocalDomain reports whether domain belongs to the configured host, users,
+// or aliases.
 func (c *Config) IsLocalDomain(domain string) bool {
 	domain = strings.TrimSuffix(strings.ToLower(strings.TrimSpace(domain)), ".")
 	if domain == "" {
@@ -224,6 +252,7 @@ func (c *Config) IsLocalDomain(domain string) bool {
 	return false
 }
 
+// Authenticate verifies a user's cleartext or SHA-256 password.
 func (c *Config) Authenticate(username, password string) bool {
 	user, ok := c.findUser(username)
 	if !ok {

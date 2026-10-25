@@ -5,6 +5,16 @@ in Go. Messages are stored as standard Maildir files, with one mailbox per
 configured user. The binary is designed to run as a long-lived `systemd`
 service.
 
+## Documentation
+
+- [Configuration and local operation](config.example.yaml) — complete example
+  with listener, TLS, authentication, and mailbox settings.
+- [Public Internet deployment](INTERNET_DEPLOYMENT.md) — DNS, TLS, firewall,
+  sender authentication, and delivery guidance.
+- [Contributing](CONTRIBUTING.md) — development workflow and review standards.
+- Go package comments — API behavior and extension points for `auth`, `config`,
+  `health`, `imap`, `logging`, `maildir`, `plugins`, and `smtp`.
+
 ## Features
 
 - Atomic Maildir delivery using `tmp` followed by a rename into `new`; IMAP
@@ -56,6 +66,14 @@ install -Dm644 config.example.yaml /etc/mymail/config.yaml
 install -Dm755 mymail /usr/local/bin/mymail
 ```
 
+Run the daemon with the default configuration path or select another file:
+
+```sh
+./mymail
+./mymail -config /etc/mymail/config.yaml
+./mymail -version
+```
+
 The `-version` flag prints the embedded version and exits without loading the
 configuration. `make` derives `VERSION` from the latest Git tag and revision
 by default; pass `VERSION=...` to set an explicit release version. Builds also
@@ -104,22 +122,29 @@ The checked-in `config.example.yaml` demonstrates STARTTLS with certificate
 paths under `/etc/mymail`; install those files before starting the service, or
 comment the two TLS file entries when running without TLS.
 
-To send a test message through the default SMTP listener, build and run the
-small `mymail-send` client:
+### `mymail-send`
+
+`mymail-send` is a small SMTP client for sending test messages. Build it with:
 
 ```sh
 go build -o mymail-send ./cmd/mymail-send
+```
+
+Send a message through the default SMTP submission listener:
+
+```sh
 ./mymail-send -from kpratt@leopard.thepratts.info -to kpratt@leopard.thepratts.info \
   -username kpratt@leopard.thepratts.info -password changeit
 ```
 
-Use `-server host:port` for another endpoint. The client also accepts
-`-subject` and `-body`, plus
-repeatable or comma-separated `-to`, `-cc`, and `-bcc` options. CC addresses
-are included in the message headers; BCC addresses are submitted to SMTP but
-are omitted from the message. SMTP authentication is required when relaying to
-an external domain, while local deliveries can still be accepted without
-authentication.
+The `-from` and `-to` options are required. Use `-server host:port` for
+another endpoint; it defaults to `127.0.0.1:587`. The client also accepts
+`-subject` and `-body`, plus repeatable or comma-separated `-to`, `-cc`, and
+`-bcc` options. CC addresses are included in the message headers; BCC addresses
+are submitted to SMTP but are omitted from the message. Provide `-username`
+and `-password` together to authenticate. SMTP authentication is required when
+relaying to an external domain, while local deliveries can still be accepted
+without authentication.
 
 Recipients whose domain is not configured as local are relayed directly to the
 domain's MX host on port 25 only for authenticated SMTP sessions. MyMail tries MX
@@ -152,16 +177,26 @@ Alias domains are treated as configured local domains, so unknown recipients
 at those domains are rejected rather than forwarded. Prefer `password_sha256`
 for a configuration file rather than
 plaintext `password` values, and restrict the file to the service account.
-Generate a compatible hash with `mymail-password`; it reads a password from
-standard input by default, or accepts it as an argument for convenience:
+### `mymail-password`
+
+`mymail-password` generates the lowercase SHA-256 hexadecimal value used by
+`password_sha256`. Build it with:
 
 ```sh
 go build -o mymail-password ./cmd/mymail-password
 printf '%s\n' 'changeit' | ./mymail-password
 ```
 
-The command prints the lowercase SHA-256 hexadecimal string to place in
-`password_sha256`.
+The command reads a password from standard input by default and prints the
+hash to standard output. It also accepts the password as a positional argument
+for convenience, although standard input avoids exposing the password in shell
+history:
+
+```sh
+./mymail-password 'changeit'
+```
+
+Place the resulting hash in the user's `password_sha256` configuration value.
 
 Configuration values may contain `${ENV_VARIABLE}` placeholders; variables
 defined in the daemon's environment are substituted when the file is loaded.

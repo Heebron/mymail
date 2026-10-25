@@ -8,50 +8,75 @@ import (
 	"sync"
 )
 
+// Decision is the action a processor requests for a message.
 type Decision uint8
 
 const (
+	// Accept continues processing and eventually delivers the message.
 	Accept Decision = iota
+	// Reject returns a permanent SMTP failure to the sender.
 	Reject
+	// TemporaryFailure returns a retryable SMTP failure.
 	TemporaryFailure
+	// Discard accepts the message without delivering it.
 	Discard
 )
 
+// Message is the message and delivery context passed to processors.
 type Message struct {
-	Data       []byte
-	From       string
+	// Data contains the complete message and may be replaced by a processor.
+	Data []byte
+	// From is the SMTP envelope sender.
+	From string
+	// Recipients contains the SMTP envelope recipients.
 	Recipients []string
-	Metadata   map[string]string
-	Maildir    string
-	Folder     string
+	// Metadata contains connection and application context.
+	Metadata map[string]string
+	// Maildir is the absolute path to the first locally delivered user's
+	// Maildir. It is empty for forwarded-only messages.
+	Maildir string
+	// Folder selects a Maildir++ folder for local delivery.
+	Folder string
 }
 
+// Result is the action and optional explanation returned by a processor.
 type Result struct {
+	// Decision controls whether processing continues or delivery stops.
 	Decision Decision
-	Reason   string
-	Folder   string
+	// Reason is returned to the sender for rejected or temporary messages.
+	Reason string
+	// Folder overrides Message.Folder when non-empty.
+	Folder string
 }
 
 // Processor is called in registration order after SMTP DATA has completed.
 // Implementations must be safe for concurrent calls from multiple sessions.
 type Processor interface {
+	// Name returns a stable name for logs and error messages.
 	Name() string
+	// Initialize prepares the processor before listeners start.
 	Initialize(context.Context) error
+	// Process examines or changes one locally delivered message.
 	Process(context.Context, *Message) (Result, error)
 }
 
+// InitializationFailure identifies a processor that could not initialize.
 type InitializationFailure struct {
 	Processor Processor
 	Err       error
 }
 
+// Chain runs registered processors in order and is safe for concurrent
+// processing after registration is complete.
 type Chain struct {
 	mu         sync.RWMutex
 	processors []Processor
 }
 
+// New creates an empty processor chain.
 func New() *Chain { return &Chain{} }
 
+// Add appends a processor to the chain.
 func (c *Chain) Add(processor Processor) error {
 	if processor == nil {
 		return errors.New("nil processor")
@@ -62,6 +87,7 @@ func (c *Chain) Add(processor Processor) error {
 	return nil
 }
 
+// Initialize initializes each processor and removes processors that fail.
 func (c *Chain) Initialize(ctx context.Context) []InitializationFailure {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -78,6 +104,8 @@ func (c *Chain) Initialize(ctx context.Context) []InitializationFailure {
 	return failures
 }
 
+// Process runs the chain. Processor errors and panics become temporary
+// failures; a non-accept decision stops the chain.
 func (c *Chain) Process(ctx context.Context, message *Message) Result {
 	c.mu.RLock()
 	processors := append([]Processor(nil), c.processors...)

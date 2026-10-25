@@ -27,32 +27,62 @@ import (
 
 const maxMessageBytes = 50 << 20
 
+// Resolver maps a local recipient address to a mailbox name.
 type Resolver func(address string) (mailbox string, ok bool)
+
+// DomainResolver reports whether a domain is configured for local delivery.
 type DomainResolver func(domain string) bool
+
+// MXLookup resolves the MX records used for forwarding external recipients.
 type MXLookup func(context.Context, string) ([]*net.MX, error)
+
+// SMTPDialer opens a connection to an external SMTP server.
 type SMTPDialer func(context.Context, string) (net.Conn, error)
+
+// Authenticator verifies SMTP credentials.
 type Authenticator func(username, password string) bool
 
+// Server receives SMTP messages, delivers local mail, and forwards external
+// recipients after authentication.
 type Server struct {
-	Addr            string
-	StartTLSConfig  *tls.Config
+	// Addr is the TCP address to listen on.
+	Addr string
+	// StartTLSConfig enables STARTTLS when non-nil.
+	StartTLSConfig *tls.Config
+	// RequireSTARTTLS blocks authentication and MAIL until TLS is active.
 	RequireSTARTTLS bool
-	Hostname        string
-	Store           *maildir.Store
-	Processors      *plugins.Chain
-	Resolve         Resolver
-	LocalDomain     DomainResolver
-	LookupMX        MXLookup
-	DialSMTP        SMTPDialer
-	Authenticate    Authenticator
-	AuthLimiter     *auth.Limiter
-	Logger          *slog.Logger
-	OnReady         func()
-	activeMu        sync.Mutex
-	active          map[net.Conn]struct{}
-	activeWG        sync.WaitGroup
+	// Hostname is the name used in SMTP greetings and EHLO responses.
+	Hostname string
+	// Store receives locally delivered messages.
+	Store *maildir.Store
+	// Processors handles locally delivered messages before storage.
+	Processors *plugins.Chain
+	// Resolve maps local recipients to mailbox names.
+	Resolve Resolver
+	// LocalDomain identifies domains that must not be forwarded.
+	LocalDomain DomainResolver
+	// LookupMX resolves external recipient domains. The system resolver is used
+	// when it is nil.
+	LookupMX MXLookup
+	// DialSMTP connects to an external MX host. A 30-second dialer is used when
+	// it is nil.
+	DialSMTP SMTPDialer
+	// Authenticate verifies SMTP login credentials.
+	Authenticate Authenticator
+	// AuthLimiter applies shared authentication throttling when non-nil.
+	AuthLimiter *auth.Limiter
+	// Logger receives structured service logs. The default logger is used when
+	// it is nil.
+	Logger *slog.Logger
+	// OnReady is called after the listener starts accepting connections.
+	OnReady  func()
+	activeMu sync.Mutex
+	active   map[net.Conn]struct{}
+	activeWG sync.WaitGroup
 }
 
+// ListenAndServe listens until ctx is canceled or the listener fails. Active
+// connections are closed during shutdown before the method returns.
 func (s *Server) ListenAndServe(ctx context.Context) error {
 	if s.Store == nil || s.Resolve == nil {
 		return errors.New("smtp server requires a store and recipient resolver")
