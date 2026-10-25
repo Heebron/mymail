@@ -8,6 +8,7 @@ import (
 
 type Status struct {
 	pluginsInitialized atomic.Bool
+	shuttingDown       atomic.Bool
 	smtpReady          atomic.Int32
 	imapReady          atomic.Int32
 	expectedSMTP       int32
@@ -22,6 +23,12 @@ func (s *Status) PluginsInitialized() {
 	s.pluginsInitialized.Store(true)
 }
 
+// BeginShutdown marks the daemon as draining. Liveness remains healthy while
+// readiness fails so traffic can be removed before the listeners stop.
+func (s *Status) BeginShutdown() {
+	s.shuttingDown.Store(true)
+}
+
 func (s *Status) MarkSMTPReady() {
 	s.smtpReady.Add(1)
 }
@@ -31,7 +38,8 @@ func (s *Status) MarkIMAPReady() {
 }
 
 func (s *Status) Ready() bool {
-	return s.pluginsInitialized.Load() &&
+	return !s.shuttingDown.Load() &&
+		s.pluginsInitialized.Load() &&
 		s.smtpReady.Load() >= s.expectedSMTP &&
 		s.imapReady.Load() >= s.expectedIMAP
 }

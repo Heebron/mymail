@@ -50,6 +50,9 @@ type Server struct {
 	OnReady         func()
 	recentMu        sync.Mutex
 	recentClaims    map[string]map[uint32]struct{}
+	activeMu        sync.Mutex
+	active          map[net.Conn]struct{}
+	activeWG        sync.WaitGroup
 }
 
 func (s *Server) ListenAndServe(ctx context.Context) error {
@@ -70,8 +73,17 @@ func (s *Server) ListenAndServe(ctx context.Context) error {
 	if s.OnReady != nil {
 		s.OnReady()
 	}
+	defer func() {
+		_ = listener.Close()
+		s.Logger.Info("IMAP listener stopped", "address", listener.Addr().String())
+		closed := s.closeActiveConnections()
+		s.Logger.Info("IMAP active connections closed", "address", listener.Addr().String(), "count", closed)
+		s.activeWG.Wait()
+		s.Logger.Info("IMAP server stopped", "address", listener.Addr().String())
+	}()
 	go func() {
 		<-ctx.Done()
+		s.Logger.Info("IMAP shutdown requested", "address", listener.Addr().String())
 		_ = listener.Close()
 	}()
 	for {
@@ -82,8 +94,42 @@ func (s *Server) ListenAndServe(ctx context.Context) error {
 			}
 			return err
 		}
-		go s.handle(ctx, conn)
+		s.trackConnection(conn)
+		go func() {
+			defer s.untrackConnection(conn)
+			s.handle(ctx, conn)
+		}()
 	}
+}
+
+func (s *Server) trackConnection(conn net.Conn) {
+	s.activeMu.Lock()
+	defer s.activeMu.Unlock()
+	if s.active == nil {
+		s.active = make(map[net.Conn]struct{})
+	}
+	s.active[conn] = struct{}{}
+	s.activeWG.Add(1)
+}
+
+func (s *Server) untrackConnection(conn net.Conn) {
+	s.activeMu.Lock()
+	delete(s.active, conn)
+	s.activeMu.Unlock()
+	s.activeWG.Done()
+}
+
+func (s *Server) closeActiveConnections() int {
+	s.activeMu.Lock()
+	connections := make([]net.Conn, 0, len(s.active))
+	for conn := range s.active {
+		connections = append(connections, conn)
+	}
+	s.activeMu.Unlock()
+	for _, conn := range connections {
+		_ = conn.Close()
+	}
+	return len(connections)
 }
 
 func (s *Server) startTLSConfig() *tls.Config {

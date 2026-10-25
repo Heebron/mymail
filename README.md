@@ -74,6 +74,25 @@ install -d -o mymail -g mymail /var/lib/mymail
 systemctl enable --now mymail
 ```
 
+The daemon handles `SIGINT` and `SIGTERM` with a graceful shutdown. The
+shutdown sequence is:
+
+1. The signal cancels the daemon context and `/readyz` immediately returns
+   `503`, removing the instance from service. `/healthz` continues to return
+   `200` while the protocol listeners drain.
+2. The SMTP and IMAP listeners stop accepting new connections. Existing
+   connections are closed, and the daemon waits for their handlers to finish.
+   This protocol drain has no application-level timeout; configure the process
+   supervisor's stop timeout if a hard upper bound is required.
+3. After all SMTP and IMAP listener goroutines finish, the health server stops
+   accepting requests and waits up to five seconds for in-flight health
+   requests to complete. The five-second timeout applies only to the health
+   server shutdown.
+
+The daemon exits after all listener goroutines have stopped. A supervisor may
+forcibly terminate it if its configured stop timeout expires before this
+sequence completes.
+
 The default listeners are cleartext SMTP `:25`, SMTP submission `:587`
 (plaintext until `STARTTLS`), and IMAP `:1143`.
 Use a reverse proxy, firewall rules, or privileged socket activation when

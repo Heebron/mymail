@@ -8,12 +8,14 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/mail"
 	"os"
 	"os/signal"
 	"sort"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -184,8 +186,19 @@ func main() {
 	}
 
 	processors := plugins.New()
-	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	ctx, cancel := context.WithCancel(context.Background())
+	shutdownSignals := make(chan os.Signal, 1)
+	signal.Notify(shutdownSignals, syscall.SIGINT, syscall.SIGTERM)
+	defer signal.Stop(shutdownSignals)
 	defer cancel()
+	go func() {
+		select {
+		case shutdownSignal := <-shutdownSignals:
+			logger.Info("shutdown signal received", "signal", shutdownSignal.String())
+			cancel()
+		case <-ctx.Done():
+		}
+	}()
 	for _, failure := range processors.Initialize(ctx) {
 		logger.Warn("plugin initialization failed", "plugin", failure.Processor.Name(), "error", failure.Err)
 	}
@@ -225,16 +238,29 @@ func main() {
 	}
 	status.PluginsInitialized()
 	healthServer := &http.Server{Addr: cfg.HealthListen, Handler: status}
+	healthListener, err := net.Listen("tcp", cfg.HealthListen)
+	if err != nil {
+		fatal("health listener failed", "address", cfg.HealthListen, "error", err)
+	}
 	listenerCount := len(smtpServers) + len(imapServers) + 1
 	errorsCh := make(chan error, listenerCount)
+	var serviceWG sync.WaitGroup
 	for _, server := range smtpServers {
-		go func() { errorsCh <- server.ListenAndServe(ctx) }()
+		serviceWG.Add(1)
+		go func(server *smtp.Server) {
+			defer serviceWG.Done()
+			errorsCh <- server.ListenAndServe(ctx)
+		}(server)
 	}
 	for _, server := range imapServers {
-		go func() { errorsCh <- server.ListenAndServe(ctx) }()
+		serviceWG.Add(1)
+		go func(server *imap.Server) {
+			defer serviceWG.Done()
+			errorsCh <- server.ListenAndServe(ctx)
+		}(server)
 	}
 	go func() {
-		if err := healthServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		if err := healthServer.Serve(healthListener); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			errorsCh <- err
 			return
 		}
@@ -242,9 +268,23 @@ func main() {
 	}()
 	go func() {
 		<-ctx.Done()
+		logger.Info("shutdown started")
+		status.BeginShutdown()
+		logger.Info("shutdown readiness disabled")
+		serviceWG.Wait()
+		logger.Info("protocol servers stopped")
 		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer shutdownCancel()
-		_ = healthServer.Shutdown(shutdownCtx)
+		logger.Info("health server shutdown started", "timeout", 5*time.Second)
+		if err := healthServer.Shutdown(shutdownCtx); err != nil {
+			if errors.Is(err, context.DeadlineExceeded) {
+				logger.Warn("health server shutdown timed out", "timeout", 5*time.Second, "error", err)
+			} else {
+				logger.Error("health server shutdown failed", "error", err)
+			}
+		} else {
+			logger.Info("health server stopped")
+		}
 	}()
 	var firstErr error
 	for range listenerCount {
