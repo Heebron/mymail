@@ -1,5 +1,4 @@
-================================================
-Oct. 25, 2026
+## Oct. 25, 2026
 Ken Pratt <kenpratt@comcast.net>
 
 The initial version of this project was created as a test by me using AI. Specifically the Junie CLI tool from JetBrains. I used GPT-6 Luna High.
