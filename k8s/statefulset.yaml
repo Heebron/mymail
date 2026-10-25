@@ -1,0 +1,79 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: mymail
+  labels:
+    app: mymail
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: mymail
+  template:
+    metadata:
+      labels:
+        app: mymail
+    spec:
+      dnsConfig:
+        options:
+          - name: ndots
+            value: "1"
+      enableServiceLinks: false
+      volumes:
+        - name: mymail-storage
+          persistentVolumeClaim:
+            claimName: mymail-storage
+      initContainers:
+        - name: set-storage-permissions
+          image: busybox:1.36
+          securityContext:
+            runAsUser: 0
+            runAsGroup: 0
+            allowPrivilegeEscalation: false
+          command:
+            - /bin/sh
+            - -c
+            - >-
+              chown -R 10001:10001 /mymail-data &&
+              find /mymail-data -type d -exec chmod 700 {} + &&
+              find /mymail-data -type f -exec chmod 600 {} +
+          volumeMounts:
+            - name: mymail-storage
+              mountPath: /mymail-data
+      containers:
+        - name: mymail
+          image: nexus.thepratts.info/pratt-registry/pratt/mymail
+          imagePullPolicy: Always
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 10001
+            runAsGroup: 10001
+            allowPrivilegeEscalation: false
+            capabilities:
+              add:
+                - NET_BIND_SERVICE
+          ports:
+            - containerPort: 25
+              name: smtp
+            - containerPort: 143
+              name: imap
+            - containerPort: 8080
+              name: health
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: health
+            periodSeconds: 10
+            timeoutSeconds: 2
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: health
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 3
+          volumeMounts:
+            - name: mymail-storage
+              mountPath: /mymail-data
+          args: ["-config", "/mymail-data/config.yaml"]
