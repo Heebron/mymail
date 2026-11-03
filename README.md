@@ -5,6 +5,10 @@ in Go. Messages are stored as standard Maildir files, with one mailbox per
 configured user. The binary is designed to run as a long-lived `systemd`
 service or as a Kubernetes StatefulSet.
 
+This is a vibe-coding experiment. All code in the project was written by the JetBrains Junie agent. I am only
+providing guidance and correction through prompting. So far this has been a success. I am now using
+this as my IMAP and SMTP production capability.
+
 ## Documentation
 
 - [Configuration and local operation](config.example.yaml) — complete example
