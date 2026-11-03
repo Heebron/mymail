@@ -1,6 +1,15 @@
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 
+namespace: default
+
+labels:
+  - includeSelectors: true
+    includeTemplates: true
+    pairs:
+      environment: homelab
+      managed-by: kustomize
+
 resources:
   - pvc.yaml
   - service-headless.yaml

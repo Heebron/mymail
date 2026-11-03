@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"sync"
 )
 
@@ -21,6 +22,22 @@ const (
 	// Discard accepts the message without delivering it.
 	Discard
 )
+
+// String returns the name used in structured logs.
+func (d Decision) String() string {
+	switch d {
+	case Accept:
+		return "accept"
+	case Reject:
+		return "reject"
+	case TemporaryFailure:
+		return "temporary_failure"
+	case Discard:
+		return "discard"
+	default:
+		return "unknown"
+	}
+}
 
 // Message is the message and delivery context passed to processors.
 type Message struct {
@@ -47,6 +64,9 @@ type Result struct {
 	Reason string
 	// Folder overrides Message.Folder when non-empty.
 	Folder string
+	// Err reports a processor error that was tolerated. When set, Decision is
+	// Accept and the original message is restored for delivery.
+	Err error
 }
 
 // Processor is called in registration order after SMTP DATA has completed.
@@ -80,10 +100,22 @@ type InitializationFailure struct {
 type Chain struct {
 	mu         sync.RWMutex
 	processors []Processor
+	logger     *slog.Logger
 }
 
 // New creates an empty processor chain.
-func New() *Chain { return &Chain{} }
+func New() *Chain { return &Chain{logger: slog.Default()} }
+
+// SetLogger configures the logger used for processor lifecycle and activity
+// events. A nil logger restores the default logger.
+func (c *Chain) SetLogger(logger *slog.Logger) {
+	if logger == nil {
+		logger = slog.Default()
+	}
+	c.mu.Lock()
+	c.logger = logger
+	c.mu.Unlock()
+}
 
 // Add appends a processor to the chain.
 func (c *Chain) Add(processor Processor) error {
@@ -100,48 +132,90 @@ func (c *Chain) Add(processor Processor) error {
 // When configured is supplied, the first matching plugin name provides the
 // settings passed to that processor. Processors without settings receive nil.
 func (c *Chain) Initialize(ctx context.Context, configured ...[]PluginConfig) []InitializationFailure {
+	logger := c.currentLogger()
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	active := make([]Processor, 0, len(c.processors))
 	var failures []InitializationFailure
 	for _, processor := range c.processors {
-		if err := initializeOne(ctx, processor, pluginSettings(processor.Name(), configured)); err != nil {
+		name := processor.Name()
+		logger.Info("plugin initialization started", "plugin", name)
+		if err := initializeOne(ctx, processor, pluginSettings(name, configured)); err != nil {
+			logger.Warn("plugin initialization failed", "plugin", name, "error", err)
 			failures = append(failures, InitializationFailure{Processor: processor, Err: err})
 			continue
 		}
+		logger.Info("plugin initialized", "plugin", name)
 		active = append(active, processor)
 	}
 	c.processors = active
 	return failures
 }
 
-// Process runs the chain. Processor errors and panics become temporary
-// failures; a non-accept decision stops the chain.
+// Process runs the chain. Processor errors and panics are returned in an
+// accepted result after restoring the original message; a non-accept decision
+// stops the chain.
 func (c *Chain) Process(ctx context.Context, message *Message) Result {
 	c.mu.RLock()
 	processors := append([]Processor(nil), c.processors...)
+	logger := c.logger
 	c.mu.RUnlock()
+	if logger == nil {
+		logger = slog.Default()
+	}
+	var originalData []byte
+	var originalFolder string
+	if message != nil {
+		originalData = append([]byte(nil), message.Data...)
+		originalFolder = message.Folder
+	}
 	for _, processor := range processors {
+		name := processor.Name()
+		logger.Info("plugin processing started", "plugin", name, "bytes", lenMessageData(message))
 		result, err := processOne(ctx, processor, message)
 		if err != nil {
-			return Result{Decision: TemporaryFailure, Reason: fmt.Sprintf("processor %s failed: %v", processor.Name(), err)}
+			logger.Warn("plugin processing failed", "plugin", name, "error", err)
+			if message != nil {
+				message.Data = originalData
+				message.Folder = originalFolder
+			}
+			return Result{Decision: Accept, Err: fmt.Errorf("processor %s failed: %w", name, err)}
 		}
 		if result.Folder != "" {
 			message.Folder = result.Folder
 		}
 		switch result.Decision {
 		case Accept:
+			logger.Info("plugin processing completed", "plugin", name, "decision", result.Decision)
 			continue
 		case Reject, TemporaryFailure, Discard:
 			if result.Reason == "" {
-				result.Reason = processor.Name()
+				result.Reason = name
 			}
+			logger.Info("plugin processing completed", "plugin", name, "decision", result.Decision, "reason", result.Reason)
 			return result
 		default:
+			logger.Warn("plugin processing failed", "plugin", name, "error", "invalid decision")
 			return Result{Decision: TemporaryFailure, Reason: "processor returned invalid decision"}
 		}
 	}
 	return Result{Decision: Accept}
+}
+
+func (c *Chain) currentLogger() *slog.Logger {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	if c.logger == nil {
+		return slog.Default()
+	}
+	return c.logger
+}
+
+func lenMessageData(message *Message) int {
+	if message == nil {
+		return 0
+	}
+	return len(message.Data)
 }
 
 func pluginSettings(name string, configured [][]PluginConfig) map[string]string {

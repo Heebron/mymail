@@ -373,6 +373,10 @@ _ = processors.Add(spamFilter)
 Processors must implement `Initialize(context.Context, map[string]string) error`
 in addition to `Name` and `Process`. `Initialize` receives the string settings
 configured for the processor name, or `nil` when no settings are configured.
+The chain emits structured logs when each processor starts and completes
+initialization or message processing, and when either operation fails. These
+events include the processor name, and processing completion events include the
+decision; message contents and initialization settings are not logged.
 
 See `plugins/example_test.go` for a complete, executable example that builds
 the chain and processes a message.
@@ -383,10 +387,12 @@ library used by your deployment. Do not register it if the configured keywords
 are not appropriate for your users.
 
 Processor instances must be safe for concurrent calls. Returning an error or
-panicking produces a temporary SMTP failure; returning `Reject`,
-`TemporaryFailure`, or `Discard` stops the chain. The command currently ships
-with an empty chain, making it a safe extension point for application-specific
-processors.
+panicking logs a warning, restores the original message, and accepts delivery
+without the failed processor's changes. Returning `Reject`, `TemporaryFailure`,
+or `Discard` stops the chain. The command registers the built-in `spamd`
+processor when it appears in the `plugins` configuration; unsupported plugin
+names prevent startup. With no configured plugins, the chain remains empty,
+making it a safe extension point for application-specific processors.
 
 ## Tests
 

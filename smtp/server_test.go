@@ -30,6 +30,10 @@ type countingProcessor struct {
 	calls int
 }
 
+type failingProcessor struct {
+	err error
+}
+
 func (p *countingProcessor) Name() string { return "counting" }
 
 func (p *countingProcessor) Initialize(context.Context, map[string]string) error { return nil }
@@ -37,6 +41,16 @@ func (p *countingProcessor) Initialize(context.Context, map[string]string) error
 func (p *countingProcessor) Process(context.Context, *plugins.Message) (plugins.Result, error) {
 	p.calls++
 	return plugins.Result{Decision: plugins.Accept}, nil
+}
+
+func (p *failingProcessor) Name() string { return "broken" }
+
+func (p *failingProcessor) Initialize(context.Context, map[string]string) error { return nil }
+
+func (p *failingProcessor) Process(_ context.Context, message *plugins.Message) (plugins.Result, error) {
+	message.Data = []byte("plugin replacement")
+	message.Folder = "Broken"
+	return plugins.Result{}, p.err
 }
 
 func TestPluginMessageIncludesAbsoluteUserMaildir(t *testing.T) {
@@ -272,6 +286,98 @@ func TestPluginDeliveryCreatesMissingFolder(t *testing.T) {
 	}
 	if len(messages) != 1 {
 		t.Fatalf("plugin folder messages = %d, want 1", len(messages))
+	}
+}
+
+func TestSMTPPluginErrorLogsAndDeliversOriginalMessage(t *testing.T) {
+	store, err := maildir.New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var logs bytes.Buffer
+	processors := plugins.New()
+	processor := &failingProcessor{err: fmt.Errorf("service unavailable")}
+	if err := processors.Add(processor); err != nil {
+		t.Fatal(err)
+	}
+	if failures := processors.Initialize(context.Background()); len(failures) != 0 {
+		t.Fatalf("processor initialization failures = %#v", failures)
+	}
+	server := &Server{
+		Hostname:   "mail.example.test",
+		Store:      store,
+		Processors: processors,
+		Resolve: func(address string) (string, bool) {
+			return "alice", strings.EqualFold(address, "alice@mail.example.test")
+		},
+		Logger: slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelInfo})),
+	}
+	serverConn, clientConn := net.Pipe()
+	defer clientConn.Close()
+	go server.handle(context.Background(), serverConn)
+
+	reader := bufio.NewReader(clientConn)
+	readLine := func() string {
+		t.Helper()
+		line, readErr := reader.ReadString('\n')
+		if readErr != nil {
+			t.Fatal(readErr)
+		}
+		return strings.TrimRight(line, "\r\n")
+	}
+	write := func(line string) {
+		t.Helper()
+		if _, writeErr := io.WriteString(clientConn, line+"\r\n"); writeErr != nil {
+			t.Fatal(writeErr)
+		}
+	}
+
+	if got := readLine(); !strings.HasPrefix(got, "220 ") {
+		t.Fatalf("greeting = %q", got)
+	}
+	write("EHLO localhost")
+	for i := 0; i < 5; i++ {
+		readLine()
+	}
+	write("MAIL FROM:<sender@example.test>")
+	if got := readLine(); !strings.HasPrefix(got, "250 ") {
+		t.Fatalf("MAIL response = %q", got)
+	}
+	write("RCPT TO:<alice@mail.example.test>")
+	if got := readLine(); !strings.HasPrefix(got, "250 ") {
+		t.Fatalf("RCPT response = %q", got)
+	}
+	write("DATA")
+	if got := readLine(); !strings.HasPrefix(got, "354 ") {
+		t.Fatalf("DATA response = %q", got)
+	}
+	original := "From: sender@example.test\r\nTo: alice@mail.example.test\r\nSubject: unchanged\r\n\r\nbody\r\n"
+	if _, err := io.WriteString(clientConn, original+".\r\n"); err != nil {
+		t.Fatal(err)
+	}
+	if got := readLine(); !strings.HasPrefix(got, "250 ") {
+		t.Fatalf("delivery response = %q", got)
+	}
+
+	messages, err := store.List("alice")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(messages) != 1 {
+		t.Fatalf("inbox messages = %d, want 1", len(messages))
+	}
+	got, err := store.Read(messages[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, []byte(original)) {
+		t.Fatalf("stored message = %q, want %q", got, original)
+	}
+	output := logs.String()
+	for _, expected := range []string{`msg="SMTP plugin failed"`, `error="processor broken failed: service unavailable"`, `msg="SMTP delivery completed"`} {
+		if !strings.Contains(output, expected) {
+			t.Fatalf("SMTP logs missing %q: %s", expected, output)
+		}
 	}
 }
 

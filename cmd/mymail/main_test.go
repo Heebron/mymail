@@ -2,12 +2,14 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"log/slog"
 	"strings"
 	"testing"
 
 	"mymail/config"
+	"mymail/plugins"
 )
 
 func TestConfigLogUsersRedactsPasswords(t *testing.T) {
@@ -109,5 +111,20 @@ func TestLogCleartextPasswordWarnings(t *testing.T) {
 		if strings.Contains(output.String(), secret) {
 			t.Fatalf("cleartext password warning contains credential material %q: %s", secret, output.String())
 		}
+	}
+}
+
+func TestRegisterConfiguredPlugins(t *testing.T) {
+	processors := plugins.New()
+	if err := registerConfiguredPlugins(processors, []config.PluginConfig{{Name: "spamd"}}); err != nil {
+		t.Fatal(err)
+	}
+
+	failures := processors.Initialize(context.Background(), []config.PluginConfig{{
+		Name:   "spamd",
+		Config: map[string]string{"timeout": "invalid"},
+	}})
+	if len(failures) != 1 || failures[0].Processor.Name() != "spamd" {
+		t.Fatalf("initialization failures = %#v, want one spamd failure", failures)
 	}
 }

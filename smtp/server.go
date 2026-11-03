@@ -391,6 +391,9 @@ func (s *Server) handle(ctx context.Context, conn net.Conn) {
 				if s.Processors != nil {
 					result = s.Processors.Process(ctx, message)
 				}
+				if result.Err != nil {
+					logger.Warn("SMTP plugin failed", "remote_addr", remoteAddr, "error", result.Err)
+				}
 				logger.Info("SMTP message processed", "remote_addr", remoteAddr, "decision", decisionName(result.Decision), "reason", cleanReason(result.Reason, ""))
 			}
 			switch result.Decision {

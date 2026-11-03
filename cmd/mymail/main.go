@@ -86,6 +86,25 @@ func logConfigUsers(logger *slog.Logger, users map[string]config.User) {
 	}
 }
 
+func registerConfiguredPlugins(processors *plugins.Chain, configured []config.PluginConfig) error {
+	if processors == nil {
+		return errors.New("nil processor chain")
+	}
+	for _, pluginConfig := range configured {
+		var processor plugins.Processor
+		switch pluginConfig.Name {
+		case "spamd":
+			processor = plugins.NewSpamdClient("")
+		default:
+			return fmt.Errorf("unsupported plugin %q", pluginConfig.Name)
+		}
+		if err := processors.Add(processor); err != nil {
+			return fmt.Errorf("register plugin %q: %w", pluginConfig.Name, err)
+		}
+	}
+	return nil
+}
+
 func main() {
 	configPath := flag.String("config", "/etc/mymail/config.yaml", "path to the YAML configuration")
 	showVersion := flag.Bool("version", false, "print the MyMail version and exit")
@@ -186,6 +205,10 @@ func main() {
 	}
 
 	processors := plugins.New()
+	processors.SetLogger(logger)
+	if err := registerConfiguredPlugins(processors, cfg.Plugins); err != nil {
+		fatal("plugin registration failed", "error", err)
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	shutdownSignals := make(chan os.Signal, 1)
 	signal.Notify(shutdownSignals, syscall.SIGINT, syscall.SIGTERM)
@@ -199,9 +222,7 @@ func main() {
 		case <-ctx.Done():
 		}
 	}()
-	for _, failure := range processors.Initialize(ctx, cfg.Plugins) {
-		logger.Warn("plugin initialization failed", "plugin", failure.Processor.Name(), "error", failure.Err)
-	}
+	processors.Initialize(ctx, cfg.Plugins)
 	authConfig := cfg.AuthThrottle
 	authConfig.Logger = logger
 	authLimiter := auth.NewLimiter(authConfig)

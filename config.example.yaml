@@ -38,11 +38,14 @@ maildir_root: /mnt/probox/@email
 hostname: mail.example.test
 # Plugins are initialized in list order. Each item names one plugin and may
 # supply string settings; setting values may use ${ENV_VAR} expansion.
+# Uncomment this block to add SpamAssassin headers through a local spamd.
 # plugins:
-#   - name: example-plugin
+#   - name: spamd
 #     config:
-#       endpoint: ${EXAMPLE_PLUGIN_ENDPOINT}
-#       token: ${EXAMPLE_PLUGIN_TOKEN}
+#       address: 127.0.0.1:783
+#       user: mymail
+#       timeout: 30s
+#       max_message_size: 10485760
 # Authenticated sessions may forward recipients at other domains to their MX host.
 users:
   user-4821@mail.example.test:

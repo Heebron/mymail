@@ -1,8 +1,11 @@
 package plugins
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"log/slog"
+	"strings"
 	"sync"
 	"testing"
 )
@@ -14,6 +17,7 @@ type testProcessor struct {
 	initialize       func(context.Context) error
 	initializeConfig func(context.Context, map[string]string) error
 	mutate           func(*Message)
+	processErr       error
 	mu               sync.Mutex
 	initCalls        int
 	calls            int
@@ -43,7 +47,7 @@ func (p *testProcessor) process(message *Message) (Result, error) {
 	if p.mutate != nil {
 		p.mutate(message)
 	}
-	return p.result, nil
+	return p.result, p.processErr
 }
 
 func TestChainStopsAtDecision(t *testing.T) {
@@ -113,6 +117,39 @@ func TestInitializeInvokesProcessorsInRegistrationOrder(t *testing.T) {
 	}
 	if first.initCalls != 1 || second.initCalls != 1 {
 		t.Fatalf("initialization calls: first=%d second=%d", first.initCalls, second.initCalls)
+	}
+}
+
+func TestChainLogsPluginInitializationAndActivity(t *testing.T) {
+	var logs bytes.Buffer
+	processor := &testProcessor{name: "example", result: Result{Decision: Accept}}
+	failed := &testProcessor{name: "broken", initErr: errors.New("unavailable")}
+	chain := New()
+	chain.SetLogger(slog.New(slog.NewTextHandler(&logs, nil)))
+	if err := chain.Add(processor); err != nil {
+		t.Fatal(err)
+	}
+	if err := chain.Add(failed); err != nil {
+		t.Fatal(err)
+	}
+	if failures := chain.Initialize(context.Background()); len(failures) != 1 {
+		t.Fatalf("initialization failures = %#v", failures)
+	}
+	if result := chain.Process(context.Background(), &Message{Data: []byte("message")}); result.Decision != Accept {
+		t.Fatalf("processing result = %#v", result)
+	}
+
+	output := logs.String()
+	for _, expected := range []string{
+		`msg="plugin initialization started" plugin=example`,
+		`msg="plugin initialized" plugin=example`,
+		`msg="plugin initialization failed" plugin=broken error=unavailable`,
+		`msg="plugin processing started" plugin=example bytes=7`,
+		`msg="plugin processing completed" plugin=example decision=accept`,
+	} {
+		if !strings.Contains(output, expected) {
+			t.Fatalf("plugin logs missing %q: %s", expected, output)
+		}
 	}
 }
 
@@ -230,6 +267,42 @@ func TestProcessorCanChangeMessageAndFolder(t *testing.T) {
 	result := chain.Process(context.Background(), message)
 	if result.Decision != Accept || string(message.Data) != "changed" || message.Folder != "Archive" {
 		t.Fatalf("message = %#v, result = %#v", message, result)
+	}
+}
+
+func TestChainAcceptsAndRestoresMessageAfterProcessorError(t *testing.T) {
+	original := []byte("Subject: original\r\n\r\nbody")
+	var logs bytes.Buffer
+	processor := &testProcessor{
+		name:       "broken",
+		processErr: errors.New("unavailable"),
+		mutate: func(message *Message) {
+			message.Data = []byte("changed")
+			message.Folder = "Changed"
+		},
+	}
+	chain := New()
+	chain.SetLogger(slog.New(slog.NewTextHandler(&logs, nil)))
+	if err := chain.Add(processor); err != nil {
+		t.Fatal(err)
+	}
+	message := &Message{Data: append([]byte(nil), original...), Folder: "INBOX"}
+
+	result := chain.Process(context.Background(), message)
+	if result.Decision != Accept {
+		t.Fatalf("result decision = %v, want accept", result.Decision)
+	}
+	if result.Err == nil || !errors.Is(result.Err, processor.processErr) {
+		t.Fatalf("result error = %v, want wrapped processor error", result.Err)
+	}
+	if !bytes.Equal(message.Data, original) {
+		t.Fatalf("message data = %q, want %q", message.Data, original)
+	}
+	if message.Folder != "INBOX" {
+		t.Fatalf("message folder = %q, want INBOX", message.Folder)
+	}
+	if !strings.Contains(logs.String(), `msg="plugin processing failed" plugin=broken`) {
+		t.Fatalf("plugin failure log missing: %s", logs.String())
 	}
 }
 
