@@ -30,7 +30,8 @@ this as my IMAP and SMTP production capability.
   recipients at other domains are forwarded to that domain's MX host only after SMTP
   authentication.
 - Receiving-side processor chain for spam filtering, malware scanning, or
-  other application-specific policies.
+  other application-specific policies, with independent processing for each
+  local mailbox in a multi-recipient message.
 - IMAP4rev1 access to `INBOX` and user-created folders, including `CAPABILITY`, `NOOP`, `LOGIN`,
   `AUTHENTICATE`, `SELECT`, `EXAMINE`, `LIST`, `LSUB`, `NAMESPACE`, `ID`,
   `IDLE` notifications for newly delivered messages, `STATUS`, `APPEND`, `FETCH`,
@@ -157,6 +158,27 @@ kubectl apply -k k8s
 The Kubernetes deployment exposes SMTP, submission, IMAP, and implicit TLS
 IMAP through a `LoadBalancer` service. During pod shutdown, readiness fails
 immediately and the pod has up to 180 seconds to drain existing connections.
+
+The StatefulSet also includes a `spamd` sidecar. Build and publish the image
+before applying the manifests:
+
+```sh
+docker build -f spamd/Dockerfile \
+  -t nexus.thepratts.info/pratt-registry/pratt/mymail-spamd:latest .
+docker push nexus.thepratts.info/pratt-registry/pratt/mymail-spamd:latest
+```
+
+The sidecar listens only on pod loopback at `127.0.0.1:783` and shares the
+`/mymail-data` volume with MyMail. Enable the `spamd` plugin in the mounted
+`config.yaml` with `address: 127.0.0.1:783`, omit `user`, and set
+`maildir_root: /mymail-data`. SpamAssassin then reads each mailbox's
+`/mymail-data/<mailbox>/.spamassassin` directory. The sidecar's parent runs as
+root so it can signal its workers during shutdown; workers drop to UID/GID
+`10001`, matching the StatefulSet storage-permission initializer. Only the
+`KILL`, `SETGID`, and `SETUID` capabilities are retained for this transition
+and shutdown handling. Its readiness and liveness checks run inside the
+sidecar and send a SPAMC `PING` request, because a pod-IP or connect-only
+probe cannot reach a loopback-only listener and produces a protocol warning.
 
 ### `mymail-send`
 
@@ -363,9 +385,10 @@ Maildir++ folder:
 spamFilter := plugins.NewKeywordSpamFilter("buy now", "free money", "viagra")
 ```
 
-For locally delivered messages, `Message.Maildir` contains the absolute path
-to the first resolved user's Maildir directory. It is empty for messages that
-only have forwarded recipients.
+For each locally delivered message, `Message.Mailbox` contains the canonical
+resolved mailbox name and `Message.Maildir` contains that mailbox's absolute
+Maildir path. A message addressed to multiple local mailboxes is processed
+once for each mailbox, so a processor can keep per-mailbox state.
 
 Register processors on the chain before starting the listeners:
 
@@ -397,6 +420,30 @@ or `Discard` stops the chain. The command registers the built-in `spamd`
 processor when it appears in the `plugins` configuration; unsupported plugin
 names prevent startup. With no configured plugins, the chain remains empty,
 making it a safe extension point for application-specific processors.
+
+### Per-mailbox SpamAssassin
+
+The built-in `spamd` processor sends the current `Message.Mailbox` as the
+SPAMC `User` header. Omit the plugin's `user` setting when using SpamAssassin
+virtual configuration; the setting is retained only as a fallback for plugin
+callers that do not provide a mailbox. Run `spamd` with a virtual config
+directory whose `%u` component is the MyMail mailbox name:
+
+```sh
+spamd \
+  --listen=127.0.0.1 \
+  --port=783 \
+  --username=mymail \
+  --nouser-config \
+  --virtual-config-dir=/mnt/probox/@email/%u/.spamassassin \
+  --allowed-ips=127.0.0.1
+```
+
+For a mailbox named `user-4821`, SpamAssassin will use
+`/mnt/probox/@email/user-4821/.spamassassin` for `user_prefs` and Bayes files,
+alongside `/mnt/probox/@email/user-4821/Maildir`. The `spamd` service account
+must be able to read each Maildir and write each `.spamassassin` directory;
+keep the daemon restricted to localhost or another protected network.
 
 ## Tests
 

@@ -95,3 +95,58 @@ spec:
             - name: mymail-storage
               mountPath: /mymail-data
           args: ["-config", "/mymail-data/config.yaml"]
+        - name: spamd
+          image: nexus.thepratts.info/pratt-registry/pratt/mymail-spamd:latest
+          imagePullPolicy: Always
+          securityContext:
+            runAsNonRoot: false
+            runAsUser: 0
+            runAsGroup: 0
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+              add:
+                - KILL
+                - SETGID
+                - SETUID
+          ports:
+            - containerPort: 783
+              name: spamd
+          readinessProbe:
+            exec:
+              command:
+                - /usr/bin/perl
+                - -MIO::Socket::INET
+                - -MIO::Select
+                - -e
+                - >-
+                  my $socket = IO::Socket::INET->new(PeerAddr => "127.0.0.1",
+                  PeerPort => 783, Proto => "tcp", Timeout => 1) or exit 1;
+                  $socket->autoflush(1); print $socket "PING SPAMC/1.5\r\n\r\n"
+                  or exit 1; my $select = IO::Select->new($socket); exit 1
+                  unless $select->can_read(1); my $response = <$socket>;
+                  exit($response !~ /^SPAMD\/1\.5 0 PONG\r?\n$/)
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 3
+          livenessProbe:
+            exec:
+              command:
+                - /usr/bin/perl
+                - -MIO::Socket::INET
+                - -MIO::Select
+                - -e
+                - >-
+                  my $socket = IO::Socket::INET->new(PeerAddr => "127.0.0.1",
+                  PeerPort => 783, Proto => "tcp", Timeout => 1) or exit 1;
+                  $socket->autoflush(1); print $socket "PING SPAMC/1.5\r\n\r\n"
+                  or exit 1; my $select = IO::Select->new($socket); exit 1
+                  unless $select->can_read(1); my $response = <$socket>;
+                  exit($response !~ /^SPAMD\/1\.5 0 PONG\r?\n$/)
+            periodSeconds: 10
+            timeoutSeconds: 2
+            failureThreshold: 3
+          volumeMounts:
+            - name: mymail-storage
+              mountPath: /mymail-data

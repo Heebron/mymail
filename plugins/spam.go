@@ -102,6 +102,13 @@ func (c *SpamdClient) Process(ctx context.Context, message *Message) (Result, er
 	if int64(len(message.Data)) > c.maxMessageSize {
 		return Result{}, fmt.Errorf("message size %d exceeds spamd limit %d", len(message.Data), c.maxMessageSize)
 	}
+	user := message.Mailbox
+	if user == "" {
+		user = c.user
+	}
+	if strings.ContainsAny(user, "\r\n") {
+		return Result{}, errors.New("spamd user contains a newline")
+	}
 
 	connection, err := (&net.Dialer{Timeout: c.timeout}).DialContext(ctx, "tcp", c.address)
 	if err != nil {
@@ -133,8 +140,8 @@ func (c *SpamdClient) Process(ctx context.Context, message *Message) (Result, er
 	if _, err := fmt.Fprintf(writer, "PROCESS SPAMC/1.5\r\nContent-length: %d\r\n", len(message.Data)); err != nil {
 		return Result{}, spamdConnectionError(ctx, "write spamd request", err)
 	}
-	if c.user != "" {
-		if _, err := fmt.Fprintf(writer, "User: %s\r\n", c.user); err != nil {
+	if user != "" {
+		if _, err := fmt.Fprintf(writer, "User: %s\r\n", user); err != nil {
 			return Result{}, spamdConnectionError(ctx, "write spamd user", err)
 		}
 	}

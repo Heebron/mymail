@@ -30,6 +30,10 @@ type countingProcessor struct {
 	calls int
 }
 
+type mailboxProcessor struct {
+	mailboxes []string
+}
+
 type failingProcessor struct {
 	err error
 }
@@ -40,6 +44,16 @@ func (p *countingProcessor) Initialize(context.Context, map[string]string) error
 
 func (p *countingProcessor) Process(context.Context, *plugins.Message) (plugins.Result, error) {
 	p.calls++
+	return plugins.Result{Decision: plugins.Accept}, nil
+}
+
+func (p *mailboxProcessor) Name() string { return "mailbox" }
+
+func (p *mailboxProcessor) Initialize(context.Context, map[string]string) error { return nil }
+
+func (p *mailboxProcessor) Process(_ context.Context, message *plugins.Message) (plugins.Result, error) {
+	p.mailboxes = append(p.mailboxes, message.Mailbox)
+	message.Data = []byte("X-Mailbox: " + message.Mailbox + "\r\n\r\nbody")
 	return plugins.Result{Decision: plugins.Accept}, nil
 }
 
@@ -65,8 +79,66 @@ func TestPluginMessageIncludesAbsoluteUserMaildir(t *testing.T) {
 	if message.Maildir != want {
 		t.Fatalf("plugin Maildir = %q, want %q", message.Maildir, want)
 	}
+	if message.Mailbox != "alice" {
+		t.Fatalf("plugin Mailbox = %q, want alice", message.Mailbox)
+	}
 	if !filepath.IsAbs(message.Maildir) {
 		t.Fatalf("plugin Maildir = %q, want absolute path", message.Maildir)
+	}
+}
+
+func TestSMTPProcessesEachLocalMailboxSeparately(t *testing.T) {
+	store, err := maildir.New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	processor := &mailboxProcessor{}
+	processors := plugins.New()
+	if err := processors.Add(processor); err != nil {
+		t.Fatal(err)
+	}
+	if failures := processors.Initialize(context.Background()); len(failures) != 0 {
+		t.Fatalf("initialization failures = %#v", failures)
+	}
+	server := &Server{Store: store, Processors: processors}
+	tx := transaction{
+		from:       "sender@example.test",
+		recipients: []string{"alice@example.test", "bob@example.test"},
+		mailboxes:  []string{"alice", "bob"},
+	}
+	data := []byte("Subject: original\r\n\r\nbody")
+	deliveries, result := server.processLocalRecipients(context.Background(), tx, data, "192.0.2.1:25")
+	if result.Decision != plugins.Accept {
+		t.Fatalf("processing result = %#v, want accept", result)
+	}
+	if got, want := strings.Join(processor.mailboxes, ","), "alice,bob"; got != want {
+		t.Fatalf("processed mailboxes = %q, want %q", got, want)
+	}
+	if len(deliveries) != 2 {
+		t.Fatalf("deliveries = %d, want 2", len(deliveries))
+	}
+	if got, want := string(data), "Subject: original\r\n\r\nbody"; got != want {
+		t.Fatalf("original data = %q, want %q", got, want)
+	}
+	if err := server.deliverProcessed(context.Background(), tx, deliveries, data); err != nil {
+		t.Fatal(err)
+	}
+	for _, mailbox := range []string{"alice", "bob"} {
+		messages, listErr := store.List(mailbox)
+		if listErr != nil {
+			t.Fatal(listErr)
+		}
+		if len(messages) != 1 {
+			t.Fatalf("%s messages = %d, want 1", mailbox, len(messages))
+		}
+		got, readErr := store.Read(messages[0])
+		if readErr != nil {
+			t.Fatal(readErr)
+		}
+		want := []byte("X-Mailbox: " + mailbox + "\r\n\r\nbody")
+		if !bytes.Equal(got, want) {
+			t.Fatalf("%s message = %q, want %q", mailbox, got, want)
+		}
 	}
 }
 

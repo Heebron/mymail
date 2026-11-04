@@ -177,7 +177,7 @@ func (c *Config) Validate() error {
 		if user.Password == "" && user.PasswordSHA256 == "" {
 			return fmt.Errorf("user %q has no password", username)
 		}
-		if user.Mailbox != "" && strings.ContainsAny(user.Mailbox, "/\\") {
+		if user.Mailbox != "" && strings.ContainsAny(user.Mailbox, "/\\\r\n") {
 			return fmt.Errorf("user %q has invalid mailbox", username)
 		}
 		mailbox := strings.TrimSpace(mailboxFor(username, user))

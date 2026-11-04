@@ -1,6 +1,7 @@
 package config
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -301,6 +302,25 @@ func TestValidateRejectsDuplicateMailboxes(t *testing.T) {
 			}
 			if err := config.Validate(); err == nil {
 				t.Fatal("Validate() accepted users sharing a mailbox")
+			}
+		})
+	}
+}
+
+func TestValidateRejectsMailboxControlCharacters(t *testing.T) {
+	for _, mailbox := range []string{"alice\nUser: attacker", "alice\rUser: attacker"} {
+		t.Run(fmt.Sprintf("%q", mailbox), func(t *testing.T) {
+			config := Config{
+				SMTPListen:  "127.0.0.1:2525",
+				IMAPListen:  "127.0.0.1:1143",
+				MaildirRoot: t.TempDir(),
+				Hostname:    "mail.example.test",
+				Users: map[string]User{
+					"alice@example.test": {Password: "secret", Mailbox: mailbox},
+				},
+			}
+			if err := config.Validate(); err == nil {
+				t.Fatal("Validate() accepted mailbox control characters")
 			}
 		})
 	}

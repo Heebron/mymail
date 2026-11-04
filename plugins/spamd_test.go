@@ -57,7 +57,7 @@ func TestSpamdClientProcessesMessage(t *testing.T) {
 			headers[strings.ToLower(name)] = strings.TrimSpace(value)
 		}
 
-		if got, want := headers["user"], "mymail"; got != want {
+		if got, want := headers["user"], "alice"; got != want {
 			serverErrors <- fmt.Errorf("User header = %q, want %q", got, want)
 			return
 		}
@@ -85,7 +85,7 @@ func TestSpamdClientProcessesMessage(t *testing.T) {
 	if err := client.Initialize(context.Background(), map[string]string{"user": "mymail"}); err != nil {
 		t.Fatal(err)
 	}
-	message := &Message{Data: []byte("Subject: hello\r\n\r\nmessage")}
+	message := &Message{Data: []byte("Subject: hello\r\n\r\nmessage"), Mailbox: "alice"}
 	result, err := client.Process(context.Background(), message)
 	if err != nil {
 		t.Fatal(err)
@@ -131,5 +131,14 @@ func TestSpamdClientPreservesMessageOnDaemonError(t *testing.T) {
 	}
 	if err := <-serverErrors; err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestSpamdClientRejectsMailboxWithNewline(t *testing.T) {
+	client := NewSpamdClient("127.0.0.1:1")
+	message := &Message{Data: []byte("message"), Mailbox: "alice\nUser: attacker"}
+	_, err := client.Process(context.Background(), message)
+	if err == nil || !strings.Contains(err.Error(), "spamd user contains a newline") {
+		t.Fatalf("Process error = %v, want mailbox validation error", err)
 	}
 }

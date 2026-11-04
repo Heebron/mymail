@@ -43,7 +43,8 @@ hostname: mail.example.test
 #   - name: spamd
 #     config:
 #       address: 127.0.0.1:783
-#       user: mymail
+#       # Omit user for per-mailbox SpamAssassin configuration. MyMail sends
+#       # the resolved mailbox name in the SPAMC User header for each delivery.
 #       timeout: 30s
 #       max_message_size: 10485760
 # Authenticated sessions may forward recipients at other domains to their MX host.

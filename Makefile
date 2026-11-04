@@ -3,6 +3,8 @@ UPX ?= upx
 REGISTRY ?= nexus.thepratts.info/pratt-registry
 IMAGE ?= pratt/mymail
 IMAGE_TAG := $(REGISTRY)/$(IMAGE)
+SPAMD_IMAGE ?= pratt/mymail-spamd
+SPAMD_IMAGE_TAG := $(REGISTRY)/$(SPAMD_IMAGE)
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || printf 'devel')
 BUILT_ON ?= $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
 MYMAIL_TEST_SENDER ?= test-sender@example.test
@@ -13,7 +15,7 @@ DIST_DIR ?= dist
 BINARIES := mymail mymail-send mymail-password
 UPX_FLAGS ?= --best --lzma
 
-.PHONY: all build image push compress windows mac raspberry-pi risc-v test vet fmt clean
+.PHONY: all build image push spamd-image spamd-push compress windows mac raspberry-pi risc-v test vet fmt clean
 
 all: build
 
@@ -24,6 +26,12 @@ image:
 
 push: image
 	docker push $(IMAGE_TAG)
+
+spamd-image:
+	docker build --file spamd/Dockerfile --tag $(SPAMD_IMAGE_TAG) .
+
+spamd-push: spamd-image
+	docker push $(SPAMD_IMAGE_TAG)
 
 mymail:
 	GOWORK=off $(GO) build -ldflags "-X main.version=$(VERSION) -X main.builtOn=$(BUILT_ON)" -o $@ ./cmd/mymail

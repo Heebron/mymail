@@ -49,8 +49,11 @@ type Message struct {
 	Recipients []string
 	// Metadata contains connection and application context.
 	Metadata map[string]string
-	// Maildir is the absolute path to the first locally delivered user's
-	// Maildir. It is empty for forwarded-only messages.
+	// Mailbox is the canonical name of the local mailbox being processed. It
+	// is empty for forwarded-only messages.
+	Mailbox string
+	// Maildir is the absolute path to the local mailbox's Maildir. It is empty
+	// for forwarded-only messages.
 	Maildir string
 	// Folder selects a Maildir++ folder for local delivery.
 	Folder string

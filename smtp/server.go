@@ -201,18 +201,58 @@ type transaction struct {
 }
 
 func (s *Server) pluginMessage(tx transaction, data []byte, remoteAddr string) *plugins.Message {
+	mailbox := ""
+	if len(tx.mailboxes) > 0 {
+		mailbox = tx.mailboxes[0]
+	}
+	return s.pluginMessageForMailbox(tx, data, remoteAddr, mailbox)
+}
+
+func (s *Server) pluginMessageForMailbox(tx transaction, data []byte, remoteAddr, mailbox string) *plugins.Message {
 	message := &plugins.Message{
-		Data:       data,
+		Data:       append([]byte(nil), data...),
 		From:       tx.from,
 		Recipients: append([]string(nil), tx.recipients...),
 		Metadata:   map[string]string{"peer": remoteAddr},
+		Mailbox:    mailbox,
 	}
-	if len(tx.mailboxes) > 0 && s.Store != nil {
-		if path, err := s.Store.MailboxPath(tx.mailboxes[0]); err == nil {
+	if mailbox != "" && s.Store != nil {
+		if path, err := s.Store.MailboxPath(mailbox); err == nil {
 			message.Maildir = path
 		}
 	}
 	return message
+}
+
+type localDelivery struct {
+	mailbox string
+	message *plugins.Message
+}
+
+func (s *Server) processLocalRecipients(ctx context.Context, tx transaction, data []byte, remoteAddr string) ([]localDelivery, plugins.Result) {
+	deliveries := make([]localDelivery, 0, len(tx.mailboxes))
+	for _, mailbox := range tx.mailboxes {
+		message := s.pluginMessageForMailbox(tx, data, remoteAddr, mailbox)
+		result := plugins.Result{Decision: plugins.Accept}
+		if s.Processors != nil {
+			result = s.Processors.Process(ctx, message)
+		}
+		if result.Err != nil {
+			s.logger().Warn("SMTP plugin failed", "mailbox", mailbox, "error", result.Err)
+		}
+		s.logger().Info("SMTP message processed", "mailbox", mailbox, "decision", decisionName(result.Decision), "reason", cleanReason(result.Reason, ""))
+		switch result.Decision {
+		case plugins.Accept:
+			deliveries = append(deliveries, localDelivery{mailbox: mailbox, message: message})
+		case plugins.Discard:
+			continue
+		case plugins.Reject, plugins.TemporaryFailure:
+			return nil, result
+		default:
+			return nil, plugins.Result{Decision: plugins.TemporaryFailure, Reason: "processor returned invalid decision"}
+		}
+	}
+	return deliveries, plugins.Result{Decision: plugins.Accept}
 }
 
 func (s *Server) handle(ctx context.Context, conn net.Conn) {
@@ -385,16 +425,10 @@ func (s *Server) handle(ctx context.Context, conn net.Conn) {
 				continue
 			}
 			logger.Info("SMTP message received", "remote_addr", remoteAddr, "from", tx.from, "to", tx.recipients, "subject", messageSubject(data), "sender", tx.from, "recipients", len(tx.recipients), "bytes", len(data))
-			message := s.pluginMessage(tx, data, remoteAddr)
 			result := plugins.Result{Decision: plugins.Accept}
+			var deliveries []localDelivery
 			if len(tx.mailboxes) > 0 {
-				if s.Processors != nil {
-					result = s.Processors.Process(ctx, message)
-				}
-				if result.Err != nil {
-					logger.Warn("SMTP plugin failed", "remote_addr", remoteAddr, "error", result.Err)
-				}
-				logger.Info("SMTP message processed", "remote_addr", remoteAddr, "decision", decisionName(result.Decision), "reason", cleanReason(result.Reason, ""))
+				deliveries, result = s.processLocalRecipients(ctx, tx, data, remoteAddr)
 			}
 			switch result.Decision {
 			case plugins.Reject:
@@ -407,11 +441,11 @@ func (s *Server) handle(ctx context.Context, conn net.Conn) {
 				logger.Info("SMTP message discarded", "remote_addr", remoteAddr)
 				_ = write("250 2.0.0 message accepted")
 			default:
-				if err := s.deliver(ctx, tx, message); err != nil {
+				if err := s.deliverProcessed(ctx, tx, deliveries, data); err != nil {
 					logger.Warn("SMTP delivery failed", "remote_addr", remoteAddr, "error", err)
 					_ = write("451 4.3.0 delivery temporarily unavailable")
 				} else {
-					logger.Info("SMTP delivery completed", "remote_addr", remoteAddr, "local_recipients", len(tx.mailboxes), "forwarded_recipients", len(tx.forward), "bytes", len(message.Data))
+					logger.Info("SMTP delivery completed", "remote_addr", remoteAddr, "local_recipients", len(deliveries), "forwarded_recipients", len(tx.forward), "bytes", len(data))
 					_ = write("250 2.0.0 message accepted for delivery")
 				}
 			}
@@ -438,16 +472,23 @@ func (s *Server) handle(ctx context.Context, conn net.Conn) {
 }
 
 func (s *Server) deliver(ctx context.Context, tx transaction, message *plugins.Message) error {
-	data := message.Data
+	deliveries := make([]localDelivery, 0, len(tx.mailboxes))
 	for _, mailbox := range tx.mailboxes {
-		delivered, err := s.Store.DeliverToFolder(mailbox, message.Folder, data)
+		deliveries = append(deliveries, localDelivery{mailbox: mailbox, message: message})
+	}
+	return s.deliverProcessed(ctx, tx, deliveries, message.Data)
+}
+
+func (s *Server) deliverProcessed(ctx context.Context, tx transaction, deliveries []localDelivery, forwardData []byte) error {
+	for _, delivery := range deliveries {
+		delivered, err := s.Store.DeliverToFolder(delivery.mailbox, delivery.message.Folder, delivery.message.Data)
 		if err != nil {
 			return err
 		}
-		s.logger().Info("SMTP local delivery completed", "mailbox", mailbox, "folder", message.Folder, "filename", delivered.Filename, "bytes", len(data))
+		s.logger().Info("SMTP local delivery completed", "mailbox", delivery.mailbox, "folder", delivery.message.Folder, "filename", delivered.Filename, "bytes", len(delivery.message.Data))
 	}
 	for _, recipient := range tx.forward {
-		if err := s.forward(ctx, tx.from, recipient, data); err != nil {
+		if err := s.forward(ctx, tx.from, recipient, forwardData); err != nil {
 			return err
 		}
 	}
