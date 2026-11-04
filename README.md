@@ -176,9 +176,10 @@ The sidecar listens only on pod loopback at `127.0.0.1:783` and shares the
 root so it can signal its workers during shutdown; workers drop to UID/GID
 `10001`, matching the StatefulSet storage-permission initializer. Only the
 `KILL`, `SETGID`, and `SETUID` capabilities are retained for this transition
-and shutdown handling. Its readiness and liveness checks run inside the
-sidecar and send a SPAMC `PING` request, because a pod-IP or connect-only
-probe cannot reach a loopback-only listener and produces a protocol warning.
+and shutdown handling. Its readiness and liveness checks inspect the
+sidecar's `/proc/net/tcp` table for port `783` in `LISTEN` state. They do not
+open a connection to `spamd` or send a SPAMC request, so the checks cannot
+produce protocol warnings.
 
 ### `mymail-send`
 

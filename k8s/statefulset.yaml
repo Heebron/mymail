@@ -116,34 +116,24 @@ spec:
           readinessProbe:
             exec:
               command:
-                - /usr/bin/perl
-                - -MIO::Socket::INET
-                - -MIO::Select
-                - -e
+                - /bin/sh
+                - -c
                 - >-
-                  my $socket = IO::Socket::INET->new(PeerAddr => "127.0.0.1",
-                  PeerPort => 783, Proto => "tcp", Timeout => 1) or exit 1;
-                  $socket->autoflush(1); print $socket "PING SPAMC/1.5\r\n\r\n"
-                  or exit 1; my $select = IO::Select->new($socket); exit 1
-                  unless $select->can_read(1); my $response = <$socket>;
-                  exit($response !~ /^SPAMD\/1\.5 0 PONG\r?\n$/)
+                  grep -Eq
+                  '^[[:space:]]*[0-9]+:[[:space:]]+[0-9A-Fa-f]+:030F[[:space:]]+[0-9A-Fa-f]+:[0-9A-Fa-f]+[[:space:]]+0A([[:space:]]|$)'
+                  /proc/net/tcp
             periodSeconds: 5
             timeoutSeconds: 2
             failureThreshold: 3
           livenessProbe:
             exec:
               command:
-                - /usr/bin/perl
-                - -MIO::Socket::INET
-                - -MIO::Select
-                - -e
+                - /bin/sh
+                - -c
                 - >-
-                  my $socket = IO::Socket::INET->new(PeerAddr => "127.0.0.1",
-                  PeerPort => 783, Proto => "tcp", Timeout => 1) or exit 1;
-                  $socket->autoflush(1); print $socket "PING SPAMC/1.5\r\n\r\n"
-                  or exit 1; my $select = IO::Select->new($socket); exit 1
-                  unless $select->can_read(1); my $response = <$socket>;
-                  exit($response !~ /^SPAMD\/1\.5 0 PONG\r?\n$/)
+                  grep -Eq
+                  '^[[:space:]]*[0-9]+:[[:space:]]+[0-9A-Fa-f]+:030F[[:space:]]+[0-9A-Fa-f]+:[0-9A-Fa-f]+[[:space:]]+0A([[:space:]]|$)'
+                  /proc/net/tcp
             periodSeconds: 10
             timeoutSeconds: 2
             failureThreshold: 3
