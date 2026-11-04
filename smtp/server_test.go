@@ -13,6 +13,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -785,6 +786,159 @@ func TestSMTPStartTLS(t *testing.T) {
 	writeTLSLine("AUTH PLAIN " + credentials)
 	if response := readLine(); !strings.HasPrefix(response, "235 ") {
 		t.Fatalf("TLS AUTH response = %q", response)
+	}
+}
+
+func TestSMTPSpamdTrainingDelivery(t *testing.T) {
+	spamdListener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer spamdListener.Close()
+
+	spamdErrors := make(chan error, 1)
+	go func() {
+		conn, acceptErr := spamdListener.Accept()
+		if acceptErr != nil {
+			spamdErrors <- acceptErr
+			return
+		}
+		defer conn.Close()
+
+		reader := bufio.NewReader(conn)
+		reqLine, _ := reader.ReadString('\n')
+		if got, want := strings.TrimSpace(reqLine), "TELL SPAMC/1.5"; got != want {
+			spamdErrors <- fmt.Errorf("request line = %q, want %q", got, want)
+			return
+		}
+		headers := make(map[string]string)
+		for {
+			line, _ := reader.ReadString('\n')
+			line = strings.TrimRight(line, "\r\n")
+			if line == "" {
+				break
+			}
+			name, val, ok := strings.Cut(line, ":")
+			if ok {
+				headers[strings.ToLower(name)] = strings.TrimSpace(val)
+			}
+		}
+		if got, want := headers["message-class"], "spam"; got != want {
+			spamdErrors <- fmt.Errorf("Message-class = %q, want %q", got, want)
+			return
+		}
+		if got, want := headers["user"], "kpratt"; got != want {
+			spamdErrors <- fmt.Errorf("User = %q, want %q", got, want)
+			return
+		}
+		length, _ := strconv.Atoi(headers["content-length"])
+		body := make([]byte, length)
+		_, _ = io.ReadFull(reader, body)
+		if !strings.Contains(string(body), "Subject: Casino") {
+			spamdErrors <- fmt.Errorf("trained body missing casino subject: %s", string(body))
+			return
+		}
+		_, writeErr := fmt.Fprintf(conn, "SPAMD/1.1 0 EX_OK\r\nDidSet: local\r\n\r\n")
+		spamdErrors <- writeErr
+	}()
+
+	store, err := maildir.New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Ensure("kpratt"); err != nil {
+		t.Fatal(err)
+	}
+
+	processors := plugins.New()
+	spamdPlugin := plugins.NewSpamdClient(spamdListener.Addr().String())
+	if err := processors.Add(spamdPlugin); err != nil {
+		t.Fatal(err)
+	}
+	if failures := processors.Initialize(context.Background()); len(failures) != 0 {
+		t.Fatalf("processor initialization failures = %#v", failures)
+	}
+
+	server := &Server{
+		Hostname:   "thepratts.info",
+		Store:      store,
+		Processors: processors,
+		Resolve: func(address string) (string, bool) {
+			if strings.EqualFold(address, "spam-kpratt@thepratts.info") {
+				return "kpratt", true
+			}
+			return "", false
+		},
+		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}
+
+	serverConn, clientConn := net.Pipe()
+	defer clientConn.Close()
+	go server.handle(context.Background(), serverConn)
+
+	reader := bufio.NewReader(clientConn)
+	readLine := func() string {
+		line, readErr := reader.ReadString('\n')
+		if readErr != nil {
+			t.Fatal(readErr)
+		}
+		return strings.TrimRight(line, "\r\n")
+	}
+	write := func(line string) {
+		if _, writeErr := io.WriteString(clientConn, line+"\r\n"); writeErr != nil {
+			t.Fatal(writeErr)
+		}
+	}
+
+	readLine() // greeting
+	write("EHLO localhost")
+	for {
+		line := readLine()
+		if strings.HasPrefix(line, "250 ") {
+			break
+		}
+	}
+	write("MAIL FROM:<kenpratt@comcast.net>")
+	if got := readLine(); !strings.HasPrefix(got, "250 ") {
+		t.Fatalf("MAIL response = %q", got)
+	}
+	write("RCPT TO:<spam-kpratt@thepratts.info>")
+	if got := readLine(); !strings.HasPrefix(got, "250 ") {
+		t.Fatalf("RCPT response = %q", got)
+	}
+	write("DATA")
+	if got := readLine(); !strings.HasPrefix(got, "354 ") {
+		t.Fatalf("DATA response = %q", got)
+	}
+	forwardedEmail := "From: spammer@example.com\r\nSubject: Casino\r\n\r\nwin cash"
+	outer := fmt.Sprintf("From: kenpratt@comcast.net\r\nTo: spam-kpratt@thepratts.info\r\nSubject: Fwd: Casino\r\nContent-Type: multipart/mixed; boundary=XYZ\r\n\r\n--XYZ\r\nContent-Type: message/rfc822\r\n\r\n%s\r\n--XYZ--", forwardedEmail)
+	write(outer)
+	write(".")
+	if got := readLine(); !strings.HasPrefix(got, "250 ") {
+		t.Fatalf("delivery response = %q", got)
+	}
+
+	if err := <-spamdErrors; err != nil {
+		t.Fatal(err)
+	}
+
+	messages, err := store.List("kpratt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(messages) != 1 {
+		t.Fatalf("inbox messages = %d, want 1", len(messages))
+	}
+	deliveredData, err := os.ReadFile(messages[0].Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	deliveredText := string(deliveredData)
+	if !strings.Contains(deliveredText, "SpamAssassin training output: SPAM") {
+		t.Fatalf("delivered message missing training output subject: %s", deliveredText)
+	}
+	if !strings.Contains(deliveredText, "DidSet: local") {
+		t.Fatalf("delivered message missing DidSet header info: %s", deliveredText)
 	}
 }
 

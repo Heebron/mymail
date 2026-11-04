@@ -38,7 +38,14 @@ maildir_root: /mnt/probox/@email
 hostname: mail.example.test
 # Plugins are initialized in list order. Each item names one plugin and may
 # supply string settings; setting values may use ${ENV_VAR} expansion.
-# Uncomment this block to add SpamAssassin headers through a local spamd.
+# Uncomment this block to enable SpamAssassin filtering and Bayes training via spamd.
+# When enabled:
+#  - Regular incoming messages are scanned and tagged with SpamAssassin headers.
+#  - Users can train SpamAssassin as spam or ham by forwarding messages to any
+#    of their account addresses or aliases prefixed with 'spam-' or 'ham-'
+#    (e.g., spam-user-4821@mail.example.test, ham-barb@example.test).
+#  - Forwarded emails in training messages are submitted to spamd for learning,
+#    and a detailed training report is delivered to the user's inbox.
 # plugins:
 #   - name: spamd
 #     config:
@@ -48,6 +55,8 @@ hostname: mail.example.test
 #       timeout: 30s
 #       max_message_size: 10485760
 # Authenticated sessions may forward recipients at other domains to their MX host.
+# Note: Any configured user address or alias automatically supports 'spam-' and
+# 'ham-' prefixes for spam/ham training without requiring additional alias entries.
 users:
   user-4821@mail.example.test:
 #    password_sha256: replace-with-lowercase-sha256-hex

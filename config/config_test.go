@@ -225,6 +225,23 @@ func TestResolveAliasesToSharedMailbox(t *testing.T) {
 			t.Fatalf("Resolve(%q) = %q, %t; want %s, true", address, mailbox, ok, testUsername)
 		}
 	}
+	// Verify spam- and ham- prefixes resolve to the same mailbox
+	senderLocalPart, senderDomain, hasSenderDomain := strings.Cut(testSender, "@")
+	aliasLocalPart, aliasDomain, hasAliasDomain := strings.Cut(alias, "@")
+
+	var prefixedAddresses []string
+	prefixedAddresses = append(prefixedAddresses, "spam-"+testAddress, "ham-"+testAddress)
+	if hasSenderDomain {
+		prefixedAddresses = append(prefixedAddresses, "spam-"+senderLocalPart+"@"+senderDomain, "ham-"+senderLocalPart+"@"+senderDomain)
+	}
+	if hasAliasDomain {
+		prefixedAddresses = append(prefixedAddresses, "spam-"+aliasLocalPart+"@"+aliasDomain, "ham-"+aliasLocalPart+"@"+aliasDomain)
+	}
+	for _, address := range prefixedAddresses {
+		if mailbox, ok := config.Resolve(address); !ok || mailbox != testUsername {
+			t.Fatalf("Resolve(%q) = %q, %t; want %s, true", address, mailbox, ok, testUsername)
+		}
+	}
 	for _, domain := range []string{testDomain} {
 		if !config.IsLocalDomain(domain) {
 			t.Fatalf("IsLocalDomain(%q) = false", domain)

@@ -235,20 +235,55 @@ func validateAuthThrottle(throttle auth.Config) error {
 }
 
 // Resolve maps a login or recipient address, including aliases, to a mailbox.
+// It also supports 'spam-' and 'ham-' prefixes on the local-part of configured
+// user addresses or aliases (for example, spam-kpratt@thepratts.info).
 func (c *Config) Resolve(username string) (string, bool) {
+	if mailbox, ok := c.resolveDirect(username); ok {
+		return mailbox, true
+	}
+	if stripped, ok := stripSpamHamPrefix(username); ok {
+		if mailbox, ok := c.resolveDirect(stripped); ok {
+			return mailbox, true
+		}
+	}
+	return "", false
+}
+
+func (c *Config) resolveDirect(username string) (string, bool) {
 	user, ok := c.findUser(username)
 	if ok {
 		return mailboxFor(username, user), true
 	}
-	username = strings.ToLower(strings.TrimSpace(username))
+	normalized := strings.ToLower(strings.TrimSpace(username))
 	for configured, user := range c.Users {
 		for _, alias := range user.Aliases {
-			if strings.ToLower(strings.TrimSpace(alias)) == username {
+			if strings.ToLower(strings.TrimSpace(alias)) == normalized {
 				return mailboxFor(configured, user), true
 			}
 		}
 	}
 	return "", false
+}
+
+func stripSpamHamPrefix(address string) (string, bool) {
+	address = strings.TrimSpace(address)
+	localPart, domain, hasDomain := strings.Cut(address, "@")
+	lowerLocal := strings.ToLower(localPart)
+	var strippedLocal string
+	if strings.HasPrefix(lowerLocal, "spam-") {
+		strippedLocal = localPart[5:]
+	} else if strings.HasPrefix(lowerLocal, "ham-") {
+		strippedLocal = localPart[4:]
+	} else {
+		return "", false
+	}
+	if strippedLocal == "" {
+		return "", false
+	}
+	if hasDomain {
+		return strippedLocal + "@" + domain, true
+	}
+	return strippedLocal, true
 }
 
 // IsLocalDomain reports whether domain belongs to the configured host, users,

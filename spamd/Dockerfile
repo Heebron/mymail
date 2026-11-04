@@ -20,4 +20,4 @@ WORKDIR /var/lib/spamd
 EXPOSE 783
 
 ENTRYPOINT ["/usr/sbin/spamd"]
-CMD ["--listen=127.0.0.1", "--port=783", "--allowed-ips=127.0.0.1", "--username=spamd", "--max-children=5", "--nouser-config", "--virtual-config-dir=/mymail-data/users/%u/spamassassin", "--pidfile=/tmp/spamd.pid", "--syslog=stderr"]
+CMD ["--listen=127.0.0.1", "--port=783", "--allowed-ips=127.0.0.1", "--username=spamd", "--max-children=5", "--nouser-config", "--virtual-config-dir=/mymail-data/users/%u/spamassassin", "--pidfile=/tmp/spamd.pid", "--syslog=stderr", "--allow-tell"]

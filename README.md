@@ -437,7 +437,8 @@ spamd \
   --username=mymail \
   --nouser-config \
   --virtual-config-dir=/mnt/probox/@email/%u/.spamassassin \
-  --allowed-ips=127.0.0.1
+  --allowed-ips=127.0.0.1 \
+  --allow-tell
 ```
 
 For a mailbox named `user-4821`, SpamAssassin will use
