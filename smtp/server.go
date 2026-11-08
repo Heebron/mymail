@@ -67,6 +67,8 @@ type Server struct {
 	// DialSMTP connects to an external MX host. A 30-second dialer is used when
 	// it is nil.
 	DialSMTP SMTPDialer
+	// DKIMSigner signs outgoing email messages before forwarding when non-nil.
+	DKIMSigner func(msg []byte) ([]byte, error)
 	// Authenticate verifies SMTP login credentials.
 	Authenticate Authenticator
 	// AuthLimiter applies shared authentication throttling when non-nil.
@@ -515,6 +517,16 @@ func (s *Server) forward(ctx context.Context, from, recipient string, data []byt
 	}
 	records = append([]*net.MX(nil), records...)
 	sort.SliceStable(records, func(i, j int) bool { return records[i].Pref < records[j].Pref })
+	forwardData := data
+	if s.DKIMSigner != nil {
+		signed, err := s.DKIMSigner(data)
+		if err != nil {
+			s.logger().Warn("SMTP DKIM signing failed", "domain", domain, "recipient", recipient, "sender", from, "error", err)
+		} else {
+			forwardData = signed
+			s.logger().Info("SMTP DKIM signature added", "domain", domain, "recipient", recipient, "sender", from)
+		}
+	}
 	var lastErr error
 	for _, record := range records {
 		host := strings.TrimSuffix(strings.TrimSpace(record.Host), ".")
@@ -528,10 +540,10 @@ func (s *Server) forward(ctx context.Context, from, recipient string, data []byt
 			lastErr = dialErr
 			continue
 		}
-		err = relaySMTP(connection, s.Hostname, from, recipient, data)
+		err = relaySMTP(connection, s.Hostname, from, recipient, forwardData)
 		_ = connection.Close()
 		if err == nil {
-			s.logger().Info("SMTP forwarding completed", "domain", domain, "recipient", recipient, "mx_host", host, "bytes", len(data))
+			s.logger().Info("SMTP forwarding completed", "domain", domain, "recipient", recipient, "mx_host", host, "bytes", len(forwardData))
 			return nil
 		}
 		s.logger().Warn("SMTP forwarding attempt failed", "domain", domain, "recipient", recipient, "mx_host", host, "error", err)

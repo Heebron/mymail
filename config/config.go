@@ -11,6 +11,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 	"mymail/auth"
+	"mymail/dkim"
 	"mymail/plugins"
 )
 
@@ -30,6 +31,31 @@ type User struct {
 // PluginConfig names one configured plugin and its optional initialization
 // settings.
 type PluginConfig = plugins.PluginConfig
+
+// DKIMConfig contains configuration settings for outbound DKIM message signing.
+type DKIMConfig struct {
+	// Domain is the domain used in DKIM signatures for outgoing email.
+	Domain string `yaml:"domain,omitempty"`
+	// PrivateKey is the private key (or file path) used to sign outgoing email.
+	PrivateKey string `yaml:"private_key,omitempty"`
+	// PublicKey is the public key (or file path / DNS TXT record) for DKIM configuration.
+	PublicKey string `yaml:"public_key,omitempty"`
+	// Selector is the selector name used in DKIM signatures.
+	Selector string `yaml:"selector,omitempty"`
+	// PrivateKeyFile is an alias for private_key.
+	PrivateKeyFile string `yaml:"private_key_file,omitempty"`
+	// PublicKeyFile is an alias for public_key.
+	PublicKeyFile string `yaml:"public_key_file,omitempty"`
+}
+
+// HasDKIM reports whether all four required DKIM configuration items
+// (domain, private key, public key, and selector) are present.
+func (d DKIMConfig) HasDKIM() bool {
+	return strings.TrimSpace(d.Domain) != "" &&
+		strings.TrimSpace(d.PrivateKey) != "" &&
+		strings.TrimSpace(d.PublicKey) != "" &&
+		strings.TrimSpace(d.Selector) != ""
+}
 
 // Config is the validated YAML configuration for the MyMail daemon.
 type Config struct {
@@ -58,6 +84,8 @@ type Config struct {
 	Hostname string `yaml:"hostname"`
 	// HealthListen is the address serving /healthz and /readyz.
 	HealthListen string `yaml:"health_listen"`
+	// DKIM configures outbound DKIM message signing.
+	DKIM DKIMConfig `yaml:"dkim,omitempty"`
 	// Plugins contains plugin names and their initialization settings.
 	Plugins []PluginConfig `yaml:"plugins,omitempty"`
 	// Users maps login addresses to mailbox and authentication settings.
@@ -107,6 +135,18 @@ func (c *Config) expandEnvironment() {
 	c.MaildirRoot = expandEnvironment(c.MaildirRoot)
 	c.Hostname = expandEnvironment(c.Hostname)
 	c.HealthListen = expandEnvironment(c.HealthListen)
+	c.DKIM.Domain = expandEnvironment(c.DKIM.Domain)
+	c.DKIM.PrivateKey = expandEnvironment(c.DKIM.PrivateKey)
+	c.DKIM.PublicKey = expandEnvironment(c.DKIM.PublicKey)
+	c.DKIM.Selector = expandEnvironment(c.DKIM.Selector)
+	c.DKIM.PrivateKeyFile = expandEnvironment(c.DKIM.PrivateKeyFile)
+	c.DKIM.PublicKeyFile = expandEnvironment(c.DKIM.PublicKeyFile)
+	if c.DKIM.PrivateKey == "" && c.DKIM.PrivateKeyFile != "" {
+		c.DKIM.PrivateKey = c.DKIM.PrivateKeyFile
+	}
+	if c.DKIM.PublicKey == "" && c.DKIM.PublicKeyFile != "" {
+		c.DKIM.PublicKey = c.DKIM.PublicKeyFile
+	}
 	for username, user := range c.Users {
 		user.Password = expandEnvironment(user.Password)
 		user.PasswordSHA256 = expandEnvironment(user.PasswordSHA256)
@@ -132,6 +172,12 @@ func expandEnvironment(value string) string {
 	})
 }
 
+// HasDKIM reports whether all four required DKIM configuration items
+// (domain, private key, public key, and selector) are present.
+func (c *Config) HasDKIM() bool {
+	return c.DKIM.HasDKIM()
+}
+
 // Validate checks listener, TLS, authentication, mailbox, and user settings.
 func (c *Config) Validate() error {
 	if strings.TrimSpace(c.SMTPListen) == "" || strings.TrimSpace(c.IMAPListen) == "" {
@@ -144,6 +190,28 @@ func (c *Config) Validate() error {
 	}
 	if strings.TrimSpace(c.MaildirRoot) == "" || strings.TrimSpace(c.Hostname) == "" {
 		return errors.New("maildir_root and hostname are required")
+	}
+	hasDKIMDomain := strings.TrimSpace(c.DKIM.Domain) != ""
+	hasDKIMPriv := strings.TrimSpace(c.DKIM.PrivateKey) != ""
+	hasDKIMPub := strings.TrimSpace(c.DKIM.PublicKey) != ""
+	hasDKIMSelector := strings.TrimSpace(c.DKIM.Selector) != ""
+	hasAnyDKIM := hasDKIMDomain || hasDKIMPriv || hasDKIMPub || hasDKIMSelector
+	hasAllDKIM := hasDKIMDomain && hasDKIMPriv && hasDKIMPub && hasDKIMSelector
+	if hasAnyDKIM && !hasAllDKIM {
+		return errors.New("dkim domain, private_key, public_key, and selector must be configured together")
+	}
+	if c.HasDKIM() {
+		privKey, err := dkim.LoadPrivateKey(c.DKIM.PrivateKey)
+		if err != nil {
+			return fmt.Errorf("dkim private key: %w", err)
+		}
+		pubKey, err := dkim.LoadPublicKey(c.DKIM.PublicKey)
+		if err != nil {
+			return fmt.Errorf("dkim public key: %w", err)
+		}
+		if err := dkim.ValidateKeyPair(privKey, pubKey); err != nil {
+			return fmt.Errorf("dkim key pair: %w", err)
+		}
 	}
 	if err := validateAuthThrottle(c.AuthThrottle); err != nil {
 		return err

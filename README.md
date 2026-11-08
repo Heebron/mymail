@@ -17,7 +17,7 @@ this as my IMAP and SMTP production capability.
   sender authentication, and delivery guidance.
 - [Contributing](CONTRIBUTING.md) — development workflow and review standards.
 - Go package comments — API behavior and extension points for `auth`, `config`,
-  `health`, `imap`, `logging`, `maildir`, `plugins`, and `smtp`.
+  `dkim`, `health`, `imap`, `logging`, `maildir`, `plugins`, and `smtp`.
 
 ## Features
 
@@ -29,6 +29,8 @@ this as my IMAP and SMTP production capability.
 - Recipient validation prevents delivery to unknown users on configured local domains;
   recipients at other domains are forwarded to that domain's MX host only after SMTP
   authentication.
+- Outbound DKIM message signing (RFC 6376) with RSA-SHA256, relaxed header and
+  body canonicalization, and configurable domain, selector, and keys.
 - Receiving-side processor chain for spam filtering, malware scanning, or
   other application-specific policies, with independent processing for each
   local mailbox in a multi-recipient message.
@@ -201,8 +203,14 @@ another endpoint; it defaults to `127.0.0.1:587`. The client also accepts
 `-subject` and `-body`, plus repeatable or comma-separated `-to`, `-cc`, and
 `-bcc` options. CC addresses are included in the message headers; BCC addresses
 are submitted to SMTP but are omitted from the message. Provide `-username`
-and `-password` together to authenticate. SMTP authentication is required when
-relaying to an external domain, while local deliveries can still be accepted
+and `-password` together to authenticate.
+
+By default, `mymail-send` negotiates STARTTLS encryption if advertised by the
+server. Direct implicit TLS (SMTPS, e.g. port 465) can be enabled with `-tls`
+(or `-smtps`). Use `-insecure-tls` (or `-k`) to accept self-signed or internal
+server certificates, and `-insecure-auth` to permit cleartext authentication over
+unencrypted connections when testing without TLS. SMTP authentication is required
+when relaying to an external domain, while local deliveries can still be accepted
 without authentication.
 
 Recipients whose domain is not configured as local are relayed directly to the
@@ -256,6 +264,32 @@ history:
 ```
 
 Place the resulting hash in the user's `password_sha256` configuration value.
+
+### `mymail-dkim`
+
+`mymail-dkim` generates RSA private and public key pairs, PEM files, and the corresponding DNS TXT record for DKIM sender authentication. Build it with:
+
+```sh
+go build -o mymail-dkim ./cmd/mymail-dkim
+```
+
+Run `mymail-dkim` with your domain and selector to generate keys and the DNS record:
+
+```sh
+./mymail-dkim -domain example.com -selector default
+```
+
+You can also specify an output directory to write the generated files (`<selector>.private.key` with `0600` permissions, `<selector>.public.key`, and `<selector>.dns.txt`):
+
+```sh
+./mymail-dkim -domain example.com -selector default -out /etc/mymail
+```
+
+JSON output is also supported via `-json`:
+
+```sh
+./mymail-dkim -domain example.com -selector default -json
+```
 
 Configuration values may contain `${ENV_VARIABLE}` placeholders; variables
 defined in the daemon's environment are substituted when the file is loaded.

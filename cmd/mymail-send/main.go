@@ -2,6 +2,7 @@
 package main
 
 import (
+	"crypto/tls"
 	"errors"
 	"flag"
 	"fmt"
@@ -15,8 +16,25 @@ import (
 
 const defaultSubject = "MyMail test message"
 
+type sendOptions struct {
+	server          string
+	from            string
+	to              []string
+	cc              []string
+	bcc             []string
+	subject         string
+	body            string
+	username        string
+	password        string
+	startTLS        bool
+	requireSTARTTLS bool
+	implicitTLS     bool
+	insecureTLS     bool
+	insecureAuth    bool
+}
+
 func main() {
-	server := flag.String("server", "127.0.0.1:587", "SMTP server address")
+	server := flag.String("server", "127.0.0.1:587", "SMTP server address (host:port or host)")
 	from := flag.String("from", "", "sender address (required)")
 	var to, cc, bcc addressListFlag
 	flag.Var(&to, "to", "recipient address (required; repeatable or comma-separated)")
@@ -26,6 +44,16 @@ func main() {
 	body := flag.String("body", "This is a test message from mymail-send.", "plain-text message body")
 	username := flag.String("username", "", "optional SMTP username")
 	password := flag.String("password", "", "optional SMTP password")
+
+	startTLS := flag.Bool("starttls", true, "negotiate STARTTLS if supported by the server")
+	requireSTARTTLS := flag.Bool("require-starttls", false, "require STARTTLS encryption")
+	implicitTLS := flag.Bool("tls", false, "use implicit TLS (SMTPS) connection from the start")
+	flag.BoolVar(implicitTLS, "smtps", false, "alias for -tls")
+	insecureTLS := flag.Bool("insecure-tls", false, "skip TLS certificate verification")
+	flag.BoolVar(insecureTLS, "insecure-skip-verify", false, "alias for -insecure-tls")
+	flag.BoolVar(insecureTLS, "k", false, "alias for -insecure-tls")
+	insecureAuth := flag.Bool("insecure-auth", false, "allow plaintext authentication over unencrypted connection")
+	flag.BoolVar(insecureAuth, "allow-insecure-auth", false, "alias for -insecure-auth")
 	flag.Parse()
 
 	if *from == "" || len(to) == 0 {
@@ -38,43 +66,84 @@ func main() {
 		os.Exit(2)
 	}
 
-	if err := sendMessage(*server, *from, to, cc, bcc, *subject, *body, *username, *password); err != nil {
+	opts := sendOptions{
+		server:          *server,
+		from:            *from,
+		to:              to,
+		cc:              cc,
+		bcc:             bcc,
+		subject:         *subject,
+		body:            *body,
+		username:        *username,
+		password:        *password,
+		startTLS:        *startTLS,
+		requireSTARTTLS: *requireSTARTTLS,
+		implicitTLS:     *implicitTLS,
+		insecureTLS:     *insecureTLS,
+		insecureAuth:    *insecureAuth,
+	}
+
+	if err := sendMessage(opts); err != nil {
 		fmt.Fprintf(os.Stderr, "send message: %v\n", err)
 		os.Exit(1)
 	}
 	fmt.Println("message sent")
 }
 
-func sendMessage(server, from string, to, cc, bcc []string, subject, body, username, password string) error {
-	fromAddress, err := parseAddress(from, "from")
+func sendMessage(opts sendOptions) error {
+	fromAddress, err := parseAddress(opts.from, "from")
 	if err != nil {
 		return err
 	}
-	toAddresses, err := parseAddresses(to, "to")
+	toAddresses, err := parseAddresses(opts.to, "to")
 	if err != nil {
 		return err
 	}
-	ccAddresses, err := parseAddresses(cc, "cc")
+	ccAddresses, err := parseAddresses(opts.cc, "cc")
 	if err != nil {
 		return err
 	}
-	bccAddresses, err := parseAddresses(bcc, "bcc")
+	bccAddresses, err := parseAddresses(opts.bcc, "bcc")
 	if err != nil {
 		return err
 	}
-	message, err := buildMessageWithRecipients(fromAddress, toAddresses, ccAddresses, subject, body)
+	message, err := buildMessageWithRecipients(fromAddress, toAddresses, ccAddresses, opts.subject, opts.body)
 	if err != nil {
 		return err
 	}
 
-	host, _, err := net.SplitHostPort(server)
+	server := opts.server
+	host, port, err := net.SplitHostPort(server)
 	if err != nil {
-		return fmt.Errorf("invalid SMTP server %q: %w", server, err)
+		if strings.Contains(err.Error(), "missing port") {
+			host = server
+			if opts.implicitTLS {
+				port = "465"
+			} else {
+				port = "587"
+			}
+			server = net.JoinHostPort(host, port)
+		} else {
+			return fmt.Errorf("invalid SMTP server %q: %w", server, err)
+		}
 	}
+
 	dialer := &net.Dialer{Timeout: 10 * time.Second}
-	connection, err := dialer.Dial("tcp", server)
-	if err != nil {
-		return fmt.Errorf("connect to SMTP server: %w", err)
+	var connection net.Conn
+	if opts.implicitTLS {
+		tlsConfig := &tls.Config{
+			ServerName:         host,
+			InsecureSkipVerify: opts.insecureTLS,
+		}
+		connection, err = tls.DialWithDialer(dialer, "tcp", server, tlsConfig)
+		if err != nil {
+			return fmt.Errorf("connect to SMTP server with TLS: %w", err)
+		}
+	} else {
+		connection, err = dialer.Dial("tcp", server)
+		if err != nil {
+			return fmt.Errorf("connect to SMTP server: %w", err)
+		}
 	}
 	defer connection.Close()
 
@@ -83,8 +152,24 @@ func sendMessage(server, from string, to, cc, bcc []string, subject, body, usern
 		return fmt.Errorf("initialize SMTP client: %w", err)
 	}
 	defer client.Close()
-	if username != "" {
-		if err := client.Auth(smtp.PlainAuth("", username, password, host)); err != nil {
+
+	if !opts.implicitTLS && opts.startTLS {
+		if hasSTARTTLS, _ := client.Extension("STARTTLS"); hasSTARTTLS {
+			tlsConfig := &tls.Config{
+				ServerName:         host,
+				InsecureSkipVerify: opts.insecureTLS,
+			}
+			if err := client.StartTLS(tlsConfig); err != nil {
+				return fmt.Errorf("starttls with SMTP server: %w", err)
+			}
+		} else if opts.requireSTARTTLS {
+			return errors.New("server does not advertise STARTTLS, but STARTTLS is required")
+		}
+	}
+
+	if opts.username != "" {
+		auth := newClientAuth("", opts.username, opts.password, host, opts.insecureAuth)
+		if err := client.Auth(auth); err != nil {
 			return fmt.Errorf("authenticate with SMTP server: %w", err)
 		}
 	}
@@ -111,7 +196,82 @@ func sendMessage(server, from string, to, cc, bcc []string, subject, body, usern
 	if err := writer.Close(); err != nil {
 		return fmt.Errorf("finish message: %w", err)
 	}
+	_ = client.Quit()
 	return nil
+}
+
+type clientAuth struct {
+	identity, username, password string
+	host                         string
+	allowInsecure                bool
+	selectedMech                 string
+	step                         int
+}
+
+func newClientAuth(identity, username, password, host string, allowInsecure bool) smtp.Auth {
+	return &clientAuth{
+		identity:      identity,
+		username:      username,
+		password:      password,
+		host:          host,
+		allowInsecure: allowInsecure,
+	}
+}
+
+func (a *clientAuth) Start(server *smtp.ServerInfo) (string, []byte, error) {
+	if !server.TLS && !isLocalhost(server.Name) && !a.allowInsecure {
+		return "", nil, errors.New("unencrypted connection (use STARTTLS or pass -insecure-auth to permit cleartext credentials)")
+	}
+	if server.Name != a.host && !a.allowInsecure {
+		return "", nil, errors.New("wrong host name")
+	}
+
+	supportsPlain := false
+	supportsLogin := false
+	for _, mech := range server.Auth {
+		if strings.EqualFold(mech, "PLAIN") {
+			supportsPlain = true
+		} else if strings.EqualFold(mech, "LOGIN") {
+			supportsLogin = true
+		}
+	}
+
+	if supportsPlain || (!supportsLogin && len(server.Auth) == 0) {
+		a.selectedMech = "PLAIN"
+		resp := []byte(a.identity + "\x00" + a.username + "\x00" + a.password)
+		return "PLAIN", resp, nil
+	}
+
+	if supportsLogin {
+		a.selectedMech = "LOGIN"
+		a.step = 0
+		return "LOGIN", nil, nil
+	}
+
+	a.selectedMech = "PLAIN"
+	resp := []byte(a.identity + "\x00" + a.username + "\x00" + a.password)
+	return "PLAIN", resp, nil
+}
+
+func (a *clientAuth) Next(fromServer []byte, more bool) ([]byte, error) {
+	if !more {
+		return nil, nil
+	}
+	if a.selectedMech == "LOGIN" {
+		a.step++
+		if a.step == 1 {
+			return []byte(a.username), nil
+		}
+		if a.step == 2 {
+			return []byte(a.password), nil
+		}
+		return nil, errors.New("unexpected server challenge in LOGIN auth")
+	}
+	return nil, errors.New("unexpected server challenge")
+}
+
+func isLocalhost(name string) bool {
+	return name == "localhost" || name == "127.0.0.1" || name == "::1"
 }
 
 func parseAddress(value, label string) (*mail.Address, error) {

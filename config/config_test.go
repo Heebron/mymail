@@ -1,6 +1,10 @@
 package config
 
 import (
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/x509"
+	"encoding/pem"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -500,4 +504,287 @@ func TestValidateRequiresTLSFilesForRequiredSTARTTLS(t *testing.T) {
 			}
 		})
 	}
+}
+
+func generateTestRSAKey(t *testing.T) (string, string) {
+	t.Helper()
+	privKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("generate rsa key: %v", err)
+	}
+	privDER := x509.MarshalPKCS1PrivateKey(privKey)
+	privPEM := pem.EncodeToMemory(&pem.Block{
+		Type:  "RSA PRIVATE KEY",
+		Bytes: privDER,
+	})
+	pubDER, err := x509.MarshalPKIXPublicKey(&privKey.PublicKey)
+	if err != nil {
+		t.Fatalf("marshal public key: %v", err)
+	}
+	pubPEM := pem.EncodeToMemory(&pem.Block{
+		Type:  "PUBLIC KEY",
+		Bytes: pubDER,
+	})
+	return string(privPEM), string(pubPEM)
+}
+
+func TestLoadYAMLDKIMConfiguration(t *testing.T) {
+	privPEM, pubPEM := generateTestRSAKey(t)
+	tmpDir := t.TempDir()
+	privFile := filepath.Join(tmpDir, "dkim.key")
+	pubFile := filepath.Join(tmpDir, "dkim.pub")
+	if err := os.WriteFile(privFile, []byte(privPEM), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(pubFile, []byte(pubPEM), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	path := filepath.Join(tmpDir, "config.yaml")
+	contents := []byte(fmt.Sprintf(`smtp_listen: 127.0.0.1:2525
+imap_listen: 127.0.0.1:1143
+maildir_root: %s/mail
+hostname: mail.thepratts.info
+dkim:
+  domain: thepratts.info
+  private_key: %s
+  public_key: %s
+  selector: default2026
+users:
+  alice@thepratts.info:
+    password: secret
+`, tmpDir, privFile, pubFile))
+
+	if err := os.WriteFile(path, contents, 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+
+	if got.DKIM.Domain != "thepratts.info" {
+		t.Errorf("DKIM.Domain = %q, want thepratts.info", got.DKIM.Domain)
+	}
+	if got.DKIM.PrivateKey != privFile {
+		t.Errorf("DKIM.PrivateKey = %q, want %q", got.DKIM.PrivateKey, privFile)
+	}
+	if got.DKIM.PublicKey != pubFile {
+		t.Errorf("DKIM.PublicKey = %q, want %q", got.DKIM.PublicKey, pubFile)
+	}
+	if got.DKIM.Selector != "default2026" {
+		t.Errorf("DKIM.Selector = %q, want default2026", got.DKIM.Selector)
+	}
+	if !got.HasDKIM() {
+		t.Error("HasDKIM() = false, want true")
+	}
+}
+
+func TestValidateDKIMConfigurationMustBeConfiguredTogether(t *testing.T) {
+	privPEM, pubPEM := generateTestRSAKey(t)
+	tests := []struct {
+		name       string
+		domain     string
+		privateKey string
+		publicKey  string
+		selector   string
+	}{
+		{
+			name:   "only domain",
+			domain: "thepratts.info",
+		},
+		{
+			name:       "only private key",
+			privateKey: privPEM,
+		},
+		{
+			name:      "only public key",
+			publicKey: pubPEM,
+		},
+		{
+			name:     "only selector",
+			selector: "default",
+		},
+		{
+			name:       "domain and private key without public key and selector",
+			domain:     "thepratts.info",
+			privateKey: privPEM,
+		},
+		{
+			name:      "domain and public key without private key and selector",
+			domain:    "thepratts.info",
+			publicKey: pubPEM,
+		},
+		{
+			name:       "private and public key without domain and selector",
+			privateKey: privPEM,
+			publicKey:  pubPEM,
+		},
+		{
+			name:       "domain, private key, and public key without selector",
+			domain:     "thepratts.info",
+			privateKey: privPEM,
+			publicKey:  pubPEM,
+		},
+		{
+			name:       "domain, private key, and selector without public key",
+			domain:     "thepratts.info",
+			privateKey: privPEM,
+			selector:   "default",
+		},
+		{
+			name:      "domain, public key, and selector without private key",
+			domain:    "thepratts.info",
+			publicKey: pubPEM,
+			selector:  "default",
+		},
+		{
+			name:       "private key, public key, and selector without domain",
+			privateKey: privPEM,
+			publicKey:  pubPEM,
+			selector:   "default",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := Defaults()
+			cfg.MaildirRoot = t.TempDir()
+			cfg.Hostname = "mail.thepratts.info"
+			cfg.Users = map[string]User{"alice@thepratts.info": {Password: "secret"}}
+			cfg.DKIM = DKIMConfig{
+				Domain:     tt.domain,
+				PrivateKey: tt.privateKey,
+				PublicKey:  tt.publicKey,
+				Selector:   tt.selector,
+			}
+
+			if err := cfg.Validate(); err == nil {
+				t.Error("Validate() accepted incomplete DKIM configuration")
+			}
+			if cfg.HasDKIM() {
+				t.Error("HasDKIM() = true for incomplete configuration")
+			}
+		})
+	}
+}
+
+func TestValidateDKIMRejectsInvalidKeys(t *testing.T) {
+	_, pubPEM := generateTestRSAKey(t)
+	cfg := Defaults()
+	cfg.MaildirRoot = t.TempDir()
+	cfg.Hostname = "mail.thepratts.info"
+	cfg.Users = map[string]User{"alice@thepratts.info": {Password: "secret"}}
+	cfg.DKIM = DKIMConfig{
+		Domain:     "thepratts.info",
+		PrivateKey: "invalid-private-key-data",
+		PublicKey:  pubPEM,
+		Selector:   "default",
+	}
+
+	if err := cfg.Validate(); err == nil {
+		t.Error("Validate() accepted invalid DKIM private key")
+	}
+}
+
+func TestValidateDKIMRejectsMismatchedKeys(t *testing.T) {
+	privPEM1, _ := generateTestRSAKey(t)
+	_, pubPEM2 := generateTestRSAKey(t)
+
+	cfg := Defaults()
+	cfg.MaildirRoot = t.TempDir()
+	cfg.Hostname = "mail.thepratts.info"
+	cfg.Users = map[string]User{"alice@thepratts.info": {Password: "secret"}}
+	cfg.DKIM = DKIMConfig{
+		Domain:     "thepratts.info",
+		PrivateKey: privPEM1,
+		PublicKey:  pubPEM2,
+		Selector:   "default",
+	}
+
+	err := cfg.Validate()
+	if err == nil {
+		t.Fatal("Validate() accepted mismatched DKIM key pair")
+	}
+	if !strings.Contains(err.Error(), "key") {
+		t.Errorf("expected error message to mention key mismatch, got: %v", err)
+	}
+}
+
+func TestLoadYAMLDKIMConfigurationInlinePEM(t *testing.T) {
+	privPEM, pubPEM := generateTestRSAKey(t)
+	tmpDir := t.TempDir()
+
+	path := filepath.Join(tmpDir, "config.yaml")
+	contents := []byte(fmt.Sprintf(`smtp_listen: 127.0.0.1:2525
+imap_listen: 127.0.0.1:1143
+maildir_root: %s/mail
+hostname: mail.thepratts.info
+dkim:
+  domain: thepratts.info
+  private_key: |
+%s
+  public_key: |
+%s
+  selector: default2026
+users:
+  alice@thepratts.info:
+    password: secret
+`, tmpDir, indentString(privPEM, 4), indentString(pubPEM, 4)))
+
+	if err := os.WriteFile(path, contents, 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if !got.HasDKIM() {
+		t.Error("HasDKIM() = false, want true")
+	}
+}
+
+func TestLoadYAMLDKIMConfigurationMissingFileReportsClearError(t *testing.T) {
+	_, pubPEM := generateTestRSAKey(t)
+	tmpDir := t.TempDir()
+	missingFile := filepath.Join(tmpDir, "nonexistent", "dkim.key")
+
+	path := filepath.Join(tmpDir, "config.yaml")
+	contents := []byte(fmt.Sprintf(`smtp_listen: 127.0.0.1:2525
+imap_listen: 127.0.0.1:1143
+maildir_root: %s/mail
+hostname: mail.thepratts.info
+dkim:
+  domain: thepratts.info
+  private_key: %s
+  public_key: |
+%s
+  selector: default2026
+users:
+  alice@thepratts.info:
+    password: secret
+`, tmpDir, missingFile, indentString(pubPEM, 4)))
+
+	if err := os.WriteFile(path, contents, 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := Load(path)
+	if err == nil {
+		t.Fatal("expected Load() to fail on missing key file, got nil")
+	}
+	if !strings.Contains(err.Error(), "read private key file") {
+		t.Errorf("expected error to mention 'read private key file', got: %v", err)
+	}
+}
+
+func indentString(s string, spaces int) string {
+	pad := strings.Repeat(" ", spaces)
+	lines := strings.Split(strings.TrimRight(s, "\n"), "\n")
+	for i, line := range lines {
+		lines[i] = pad + line
+	}
+	return strings.Join(lines, "\n")
 }

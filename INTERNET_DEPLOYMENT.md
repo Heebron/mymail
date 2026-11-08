@@ -148,9 +148,24 @@ If an outbound relay is used, publish the relay provider's prescribed SPF
 `include` instead of, or in addition to, the server IP. Keep one SPF record per
 domain; multiple SPF records are invalid.
 
-MyMail does not DKIM-sign outbound messages. For reliable delivery, send
-through a relay or a separate outbound signing component and publish the
-selector it supplies, for example:
+MyMail supports DKIM-signing outbound messages when `domain`, `private_key`,
+`public_key`, and `selector` are configured under `dkim` in `config.yaml`. For example:
+
+```yaml
+dkim:
+  domain: example.com
+  private_key: /etc/mymail/dkim.key
+  public_key: /etc/mymail/dkim.pub
+  selector: selector1
+```
+
+You can generate the RSA key pair, PEM files, and DNS TXT record using `mymail-dkim`:
+
+```sh
+./mymail-dkim -domain example.com -selector selector1 -out /etc/mymail
+```
+
+Publish the corresponding DKIM TXT record at your domain's DNS:
 
 ```text
 selector1._domainkey.example.com. TXT "v=DKIM1; k=rsa; p=<PUBLIC_KEY>"
@@ -174,7 +189,7 @@ hosts on TCP port `25`. The direct path:
 - Tries MX hosts in preference order.
 - Does not negotiate outbound `STARTTLS`.
 - Does not provide a durable outbound queue or retry store.
-- Does not DKIM-sign messages.
+- Adds DKIM signatures when DKIM is configured.
 
 Direct delivery can be useful for controlled testing, but a new or residential
 IP address may be blocked, deferred, or rate-limited even when DNS is correct.

@@ -36,6 +36,18 @@ auth_throttle:
 # Values may use environment variables, for example: ${HOME}/mymail
 maildir_root: /mnt/probox/@email
 hostname: mail.example.test
+# DKIM signing for outgoing emails. When domain, private_key, public_key, and
+# selector are all configured, MyMail adds a DKIM-Signature header to outgoing
+# messages before forwarding them to destination MX hosts.
+# dkim:
+#   # Domain used in DKIM signatures for outgoing email.
+#   domain: example.test
+#   # Private key (or file path) used to sign outgoing email (alias: private_key_file).
+#   private_key: /etc/mymail/dkim.key
+#   # Public key (or file path / DNS TXT record) for DKIM configuration (alias: public_key_file).
+#   public_key: /etc/mymail/dkim.pub
+#   # Selector name used in DKIM signatures.
+#   selector: default
 # Plugins are initialized in list order. Each item names one plugin and may
 # supply string settings; setting values may use ${ENV_VAR} expansion.
 # Uncomment this block to enable SpamAssassin filtering and Bayes training via spamd.

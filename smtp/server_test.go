@@ -4,8 +4,12 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/rand"
+	"crypto/rsa"
 	"crypto/tls"
+	"crypto/x509"
 	"encoding/base64"
+	"encoding/pem"
 	"fmt"
 	"io"
 	"log/slog"
@@ -19,6 +23,7 @@ import (
 	"time"
 
 	"mymail/auth"
+	"mymail/dkim"
 	"mymail/maildir"
 	"mymail/plugins"
 )
@@ -603,6 +608,172 @@ func TestSMTPDeliveryForwardsUnknownDomainToMX(t *testing.T) {
 		if !strings.Contains(output, expected) {
 			t.Fatalf("forwarding logs missing %q: %s", expected, output)
 		}
+	}
+}
+
+func TestSMTPForwardingWithDKIM(t *testing.T) {
+	privKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	privDER := x509.MarshalPKCS1PrivateKey(privKey)
+	privPEM := pem.EncodeToMemory(&pem.Block{
+		Type:  "RSA PRIVATE KEY",
+		Bytes: privDER,
+	})
+	pubDER, err := x509.MarshalPKIXPublicKey(&privKey.PublicKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pubPEM := pem.EncodeToMemory(&pem.Block{
+		Type:  "PUBLIC KEY",
+		Bytes: pubDER,
+	})
+
+	signer, err := dkim.NewSigner("sender.test", "default", string(privPEM), string(pubPEM))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	store, err := maildir.New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	relayServer, relayClient := net.Pipe()
+	defer relayClient.Close()
+	inboundServer, inboundClient := net.Pipe()
+	defer inboundClient.Close()
+
+	var logs bytes.Buffer
+	server := &Server{
+		Hostname: "mail.sender.test",
+		Store:    store,
+		Resolve:  func(string) (string, bool) { return "", false },
+		LocalDomain: func(domain string) bool {
+			return strings.EqualFold(domain, "sender.test")
+		},
+		LookupMX: func(context.Context, string) ([]*net.MX, error) {
+			return []*net.MX{{Host: "mx.remote.test", Pref: 10}}, nil
+		},
+		DialSMTP: func(context.Context, string) (net.Conn, error) {
+			return relayClient, nil
+		},
+		DKIMSigner: signer.Sign,
+		Authenticate: func(username, password string) bool {
+			return username == "relay" && password == "secret"
+		},
+		Logger: slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelInfo})),
+	}
+
+	var relayed bytes.Buffer
+	relayErrors := make(chan error, 1)
+	go func() {
+		defer relayServer.Close()
+		reader := bufio.NewReader(relayServer)
+		writeResponse := func(line string) error {
+			_, writeErr := io.WriteString(relayServer, line+"\r\n")
+			return writeErr
+		}
+		if err := writeResponse("220 mx.remote.test ESMTP"); err != nil {
+			relayErrors <- err
+			return
+		}
+		for _, response := range []string{"250 mx.remote.test", "250 sender ok", "250 recipient ok", "354 continue"} {
+			if _, err := reader.ReadString('\n'); err != nil {
+				relayErrors <- err
+				return
+			}
+			if err := writeResponse(response); err != nil {
+				relayErrors <- err
+				return
+			}
+		}
+		for {
+			line, err := reader.ReadString('\n')
+			if err != nil {
+				relayErrors <- err
+				return
+			}
+			if line == ".\r\n" {
+				break
+			}
+			relayed.WriteString(line)
+		}
+		if err := writeResponse("250 queued"); err != nil {
+			relayErrors <- err
+			return
+		}
+		if _, err := reader.ReadString('\n'); err != nil {
+			relayErrors <- err
+			return
+		}
+		relayErrors <- nil
+	}()
+	go server.handle(context.Background(), inboundServer)
+
+	reader := bufio.NewReader(inboundClient)
+	readLine := func() string {
+		t.Helper()
+		line, readErr := reader.ReadString('\n')
+		if readErr != nil {
+			t.Fatal(readErr)
+		}
+		return strings.TrimRight(line, "\r\n")
+	}
+	writeLine := func(line string) {
+		t.Helper()
+		if _, writeErr := io.WriteString(inboundClient, line+"\r\n"); writeErr != nil {
+			t.Fatal(writeErr)
+		}
+	}
+	if got := readLine(); !strings.HasPrefix(got, "220 ") {
+		t.Fatalf("greeting = %q", got)
+	}
+	writeLine("EHLO sender.test")
+	for i := 0; i < 5; i++ {
+		readLine()
+	}
+	credentials := base64.StdEncoding.EncodeToString([]byte("\x00relay\x00secret"))
+	writeLine("AUTH PLAIN " + credentials)
+	if got := readLine(); !strings.HasPrefix(got, "235 ") {
+		t.Fatalf("AUTH response = %q", got)
+	}
+	writeLine("MAIL FROM:<sender@sender.test>")
+	if got := readLine(); !strings.HasPrefix(got, "250 ") {
+		t.Fatalf("MAIL response = %q", got)
+	}
+	writeLine("RCPT TO:<recipient@remote.test>")
+	if got := readLine(); !strings.HasPrefix(got, "250 ") {
+		t.Fatalf("RCPT response = %q", got)
+	}
+	writeLine("DATA")
+	if got := readLine(); !strings.HasPrefix(got, "354 ") {
+		t.Fatalf("DATA response = %q", got)
+	}
+	writeLine("From: sender@sender.test\r\nTo: recipient@remote.test\r\nSubject: relay with dkim\r\n\r\nHello remote recipient")
+	writeLine(".")
+	if got := readLine(); !strings.HasPrefix(got, "250 ") {
+		t.Fatalf("delivery response = %q", got)
+	}
+	if err := <-relayErrors; err != nil {
+		t.Fatal(err)
+	}
+
+	relayedData := relayed.Bytes()
+	if !bytes.Contains(relayedData, []byte("DKIM-Signature:")) {
+		t.Fatalf("relayed message missing DKIM-Signature header: %s", string(relayedData))
+	}
+	if !bytes.Contains(relayedData, []byte("d=sender.test")) {
+		t.Fatalf("relayed message missing domain tag in DKIM-Signature: %s", string(relayedData))
+	}
+
+	if err := dkim.Verify(relayedData, signer.PublicKey()); err != nil {
+		t.Fatalf("relayed message failed DKIM verification: %v", err)
+	}
+
+	if !strings.Contains(logs.String(), `msg="SMTP DKIM signature added"`) {
+		t.Fatalf("logs missing DKIM signature log: %s", logs.String())
 	}
 }
 

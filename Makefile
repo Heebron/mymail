@@ -12,7 +12,7 @@ MYMAIL_TEST_USERNAME ?= test-user
 MYMAIL_TEST_ADDRESS ?= test-user@mail.example.test
 DIST_DIR ?= dist
 
-BINARIES := mymail mymail-send mymail-password
+BINARIES := mymail mymail-send mymail-password mymail-dkim
 UPX_FLAGS ?= --best --lzma
 
 .PHONY: all build image push spamd-image spamd-push compress windows mac raspberry-pi risc-v test vet fmt clean
@@ -42,29 +42,36 @@ mymail-send:
 mymail-password:
 	GOWORK=off $(GO) build -o $@ ./cmd/mymail-password
 
+mymail-dkim:
+	GOWORK=off $(GO) build -o $@ ./cmd/mymail-dkim
+
 windows:
 	@mkdir -p $(DIST_DIR)/windows
 	GOWORK=off GOOS=windows GOARCH=amd64 $(GO) build -ldflags "-X main.version=$(VERSION) -X main.builtOn=$(BUILT_ON)" -o $(DIST_DIR)/windows/mymail.exe ./cmd/mymail
 	GOWORK=off GOOS=windows GOARCH=amd64 $(GO) build -o $(DIST_DIR)/windows/mymail-send.exe ./cmd/mymail-send
 	GOWORK=off GOOS=windows GOARCH=amd64 $(GO) build -o $(DIST_DIR)/windows/mymail-password.exe ./cmd/mymail-password
+	GOWORK=off GOOS=windows GOARCH=amd64 $(GO) build -o $(DIST_DIR)/windows/mymail-dkim.exe ./cmd/mymail-dkim
 
 mac:
 	@mkdir -p $(DIST_DIR)/mac
 	GOWORK=off GOOS=darwin GOARCH=amd64 $(GO) build -ldflags "-X main.version=$(VERSION) -X main.builtOn=$(BUILT_ON)" -o $(DIST_DIR)/mac/mymail ./cmd/mymail
 	GOWORK=off GOOS=darwin GOARCH=amd64 $(GO) build -o $(DIST_DIR)/mac/mymail-send ./cmd/mymail-send
 	GOWORK=off GOOS=darwin GOARCH=amd64 $(GO) build -o $(DIST_DIR)/mac/mymail-password ./cmd/mymail-password
+	GOWORK=off GOOS=darwin GOARCH=amd64 $(GO) build -o $(DIST_DIR)/mac/mymail-dkim ./cmd/mymail-dkim
 
 raspberry-pi:
 	@mkdir -p $(DIST_DIR)/raspberry-pi
 	GOWORK=off GOOS=linux GOARCH=arm GOARM=7 $(GO) build -ldflags "-X main.version=$(VERSION) -X main.builtOn=$(BUILT_ON)" -o $(DIST_DIR)/raspberry-pi/mymail ./cmd/mymail
 	GOWORK=off GOOS=linux GOARCH=arm GOARM=7 $(GO) build -o $(DIST_DIR)/raspberry-pi/mymail-send ./cmd/mymail-send
 	GOWORK=off GOOS=linux GOARCH=arm GOARM=7 $(GO) build -o $(DIST_DIR)/raspberry-pi/mymail-password ./cmd/mymail-password
+	GOWORK=off GOOS=linux GOARCH=arm GOARM=7 $(GO) build -o $(DIST_DIR)/raspberry-pi/mymail-dkim ./cmd/mymail-dkim
 
 risc-v:
 	@mkdir -p $(DIST_DIR)/risc-v
 	GOWORK=off GOOS=linux GOARCH=riscv64 $(GO) build -ldflags "-X main.version=$(VERSION) -X main.builtOn=$(BUILT_ON)" -o $(DIST_DIR)/risc-v/mymail ./cmd/mymail
 	GOWORK=off GOOS=linux GOARCH=riscv64 $(GO) build -o $(DIST_DIR)/risc-v/mymail-send ./cmd/mymail-send
 	GOWORK=off GOOS=linux GOARCH=riscv64 $(GO) build -o $(DIST_DIR)/risc-v/mymail-password ./cmd/mymail-password
+	GOWORK=off GOOS=linux GOARCH=riscv64 $(GO) build -o $(DIST_DIR)/risc-v/mymail-dkim ./cmd/mymail-dkim
 
 compress: build
 	@command -v $(UPX) >/dev/null 2>&1 || { echo "error: $(UPX) is required for compression" >&2; exit 1; }

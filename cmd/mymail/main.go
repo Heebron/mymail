@@ -4,6 +4,7 @@ package main
 import (
 	"context"
 	"crypto/tls"
+	"crypto/x509"
 	"errors"
 	"flag"
 	"fmt"
@@ -21,6 +22,7 @@ import (
 
 	"mymail/auth"
 	"mymail/config"
+	"mymail/dkim"
 	"mymail/health"
 	"mymail/imap"
 	"mymail/logging"
@@ -84,6 +86,82 @@ func logConfigUsers(logger *slog.Logger, users map[string]config.User) {
 			"has_password_sha256", user.HasPasswordSHA256,
 		)
 	}
+}
+
+func certificateSANs(cert *x509.Certificate) []string {
+	if cert == nil {
+		return []string{}
+	}
+	sans := make([]string, 0, len(cert.DNSNames)+len(cert.IPAddresses)+len(cert.EmailAddresses)+len(cert.URIs))
+	for _, name := range cert.DNSNames {
+		if trimmed := strings.TrimSpace(name); trimmed != "" {
+			sans = append(sans, trimmed)
+		}
+	}
+	for _, ip := range cert.IPAddresses {
+		if len(ip) > 0 {
+			sans = append(sans, ip.String())
+		}
+	}
+	for _, email := range cert.EmailAddresses {
+		if trimmed := strings.TrimSpace(email); trimmed != "" {
+			sans = append(sans, trimmed)
+		}
+	}
+	for _, uri := range cert.URIs {
+		if uri != nil && uri.String() != "" {
+			sans = append(sans, uri.String())
+		}
+	}
+	return sans
+}
+
+const certExpiryWarningThreshold = 30 * 24 * time.Hour
+
+func checkTLSCertificateExpiration(logger *slog.Logger, cert *x509.Certificate, certFile string, now time.Time) (bool, time.Duration) {
+	if cert == nil {
+		return false, 0
+	}
+	expiresIn := cert.NotAfter.Sub(now)
+	if expiresIn <= certExpiryWarningThreshold {
+		if logger != nil {
+			daysRemaining := int(expiresIn / (24 * time.Hour))
+			logger.Warn("TLS certificate expires soon",
+				"tls_cert_file", certFile,
+				"subject_dn", cert.Subject.String(),
+				"not_after", cert.NotAfter.UTC().Format(time.RFC3339),
+				"expires_in", expiresIn.Round(time.Second).String(),
+				"days_remaining", daysRemaining,
+			)
+		}
+		return true, expiresIn
+	}
+	return false, expiresIn
+}
+
+func logTLSCertificate(logger *slog.Logger, cert *tls.Certificate, certFile string) (string, []string, error) {
+	if cert == nil || len(cert.Certificate) == 0 {
+		return "", nil, errors.New("empty certificate chain")
+	}
+	if cert.Leaf == nil {
+		leaf, err := x509.ParseCertificate(cert.Certificate[0])
+		if err != nil {
+			return "", nil, err
+		}
+		cert.Leaf = leaf
+	}
+	subjectDN := cert.Leaf.Subject.String()
+	sans := certificateSANs(cert.Leaf)
+	if logger != nil {
+		logger.Info("TLS certificate loaded",
+			"tls_cert_file", certFile,
+			"subject_dn", subjectDN,
+			"subject_alt_names", sans,
+			"not_after", cert.Leaf.NotAfter.UTC().Format(time.RFC3339),
+		)
+		checkTLSCertificateExpiration(logger, cert.Leaf, certFile, time.Now())
+	}
+	return subjectDN, sans, nil
 }
 
 func registerConfiguredPlugins(processors *plugins.Chain, configured []config.PluginConfig) error {
@@ -153,12 +231,22 @@ func main() {
 		"maildir_root", cfg.MaildirRoot,
 		"hostname", cfg.Hostname,
 	)
+	logger.Info("configuration DKIM",
+		"domain", cfg.DKIM.Domain,
+		"private_key", cfg.DKIM.PrivateKey,
+		"public_key", cfg.DKIM.PublicKey,
+		"selector", cfg.DKIM.Selector,
+		"enabled", cfg.HasDKIM(),
+	)
 	logCleartextPasswordWarnings(logger, cfg.Users)
 	logConfigUsers(logger, cfg.Users)
 	var tlsConfig *tls.Config
 	if cfg.TLSCertFile != "" || cfg.TLSKeyFile != "" {
 		certificate, err := tls.LoadX509KeyPair(cfg.TLSCertFile, cfg.TLSKeyFile)
 		if err != nil {
+			fatal("TLS certificate initialization failed", "error", err)
+		}
+		if _, _, err := logTLSCertificate(logger, &certificate, cfg.TLSCertFile); err != nil {
 			fatal("TLS certificate initialization failed", "error", err)
 		}
 		tlsConfig = &tls.Config{
@@ -226,10 +314,23 @@ func main() {
 	authConfig := cfg.AuthThrottle
 	authConfig.Logger = logger
 	authLimiter := auth.NewLimiter(authConfig)
+	var dkimSigner func(msg []byte) ([]byte, error)
+	if cfg.HasDKIM() {
+		signer, err := dkim.NewSigner(cfg.DKIM.Domain, cfg.DKIM.Selector, cfg.DKIM.PrivateKey, cfg.DKIM.PublicKey)
+		if err != nil {
+			fatal("DKIM initialization failed", "error", err)
+		}
+		signer.SetLogger(logger)
+		dkimSigner = signer.Sign
+		logger.Info("DKIM key pair validated", "domain", cfg.DKIM.Domain, "selector", signer.Selector())
+		logger.Info("DKIM signing enabled", "domain", cfg.DKIM.Domain, "selector", signer.Selector())
+	} else {
+		logger.Info("DKIM signing disabled")
+	}
 	newSMTPServer := func(addr string, startTLSConfig *tls.Config, requireSTARTTLS bool) *smtp.Server {
 		return &smtp.Server{
 			Addr: addr, StartTLSConfig: startTLSConfig, RequireSTARTTLS: requireSTARTTLS, Hostname: cfg.Hostname, Store: store,
-			Processors: processors, Resolve: resolve, LocalDomain: localDomain, Authenticate: authenticate, AuthLimiter: authLimiter, Logger: logger,
+			Processors: processors, Resolve: resolve, LocalDomain: localDomain, DKIMSigner: dkimSigner, Authenticate: authenticate, AuthLimiter: authLimiter, Logger: logger,
 		}
 	}
 	newIMAPServer := func(addr string, config *tls.Config) *imap.Server {
