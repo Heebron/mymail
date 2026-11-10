@@ -29,6 +29,7 @@ import (
 	"mymail/maildir"
 	"mymail/plugins"
 	"mymail/smtp"
+	"mymail/split"
 )
 
 var (
@@ -206,40 +207,84 @@ func main() {
 		fatal("configuration failed", "error", err)
 	}
 	logger.Info("configuration loaded", "path", *configPath)
+	splitEnabled := cfg.SplitMode == "on"
+	// In remote-only split mode, log only what is relevant to that role.
+	isRemoteOnly := splitEnabled && cfg.IsSplitRemote() && !cfg.IsSplitLocal()
+
 	logger.Info("configuration listeners",
 		"smtp_listen", cfg.SMTPListen,
 		"smtp_cleartext_listen", cfg.SMTPCleartextListen,
-		"imap_listen", cfg.IMAPListen,
-		"imap_tls_listen", cfg.IMAPTLSListen,
 	)
+	if !isRemoteOnly {
+		logger.Info("configuration IMAP listeners",
+			"imap_listen", cfg.IMAPListen,
+			"imap_tls_listen", cfg.IMAPTLSListen,
+		)
+	}
 	logger.Info("configuration TLS",
 		"tls_cert_file", cfg.TLSCertFile,
 		"tls_key_file", cfg.TLSKeyFile,
 		"smtp_require_starttls", cfg.SMTPRequireSTARTTLS,
-		"imap_require_starttls", cfg.IMAPRequireSTARTTLS,
 	)
-	logger.Info("configuration authentication throttling",
-		"max_attempts_per_connection", cfg.AuthThrottle.MaxAttemptsPerConnection,
-		"max_failures_per_ip", cfg.AuthThrottle.MaxFailuresPerIP,
-		"max_failures_per_account", cfg.AuthThrottle.MaxFailuresPerAccount,
-		"backoff_base", cfg.AuthThrottle.BackoffBase,
-		"backoff_max", cfg.AuthThrottle.BackoffMax,
-		"response_delay_max", cfg.AuthThrottle.ResponseDelayMax,
-		"failure_window", cfg.AuthThrottle.FailureWindow,
-	)
-	logger.Info("configuration storage",
-		"maildir_root", cfg.MaildirRoot,
-		"hostname", cfg.Hostname,
-	)
-	logger.Info("configuration DKIM",
-		"domain", cfg.DKIM.Domain,
-		"private_key", cfg.DKIM.PrivateKey,
-		"public_key", cfg.DKIM.PublicKey,
-		"selector", cfg.DKIM.Selector,
-		"enabled", cfg.HasDKIM(),
-	)
-	logCleartextPasswordWarnings(logger, cfg.Users)
-	logConfigUsers(logger, cfg.Users)
+	if !isRemoteOnly {
+		logger.Info("configuration IMAP TLS",
+			"imap_require_starttls", cfg.IMAPRequireSTARTTLS,
+		)
+		logger.Info("configuration authentication throttling",
+			"max_attempts_per_connection", cfg.AuthThrottle.MaxAttemptsPerConnection,
+			"max_failures_per_ip", cfg.AuthThrottle.MaxFailuresPerIP,
+			"max_failures_per_account", cfg.AuthThrottle.MaxFailuresPerAccount,
+			"backoff_base", cfg.AuthThrottle.BackoffBase,
+			"backoff_max", cfg.AuthThrottle.BackoffMax,
+			"response_delay_max", cfg.AuthThrottle.ResponseDelayMax,
+			"failure_window", cfg.AuthThrottle.FailureWindow,
+		)
+		logger.Info("configuration storage",
+			"maildir_root", cfg.MaildirRoot,
+			"hostname", cfg.Hostname,
+		)
+		logger.Info("configuration DKIM",
+			"domain", cfg.DKIM.Domain,
+			"private_key", cfg.DKIM.PrivateKey,
+			"public_key", cfg.DKIM.PublicKey,
+			"selector", cfg.DKIM.Selector,
+			"enabled", cfg.HasDKIM(),
+		)
+		logCleartextPasswordWarnings(logger, cfg.Users)
+		logConfigUsers(logger, cfg.Users)
+	}
+
+	// Split mode logging.
+	splitModeLabel := "off"
+	if splitEnabled {
+		if cfg.IsSplitRemote() && cfg.IsSplitLocal() {
+			splitModeLabel = "local,remote"
+		} else if cfg.IsSplitRemote() {
+			splitModeLabel = "remote"
+		} else if cfg.IsSplitLocal() {
+			splitModeLabel = "local"
+		}
+		if cfg.IsSplitRemote() && cfg.IsSplitLocal() {
+			logger.Info("configuration split mode",
+				"mode", splitModeLabel,
+				"listen", cfg.SplitListen,
+				"connect", cfg.SplitConnect,
+				"insecure_skip_verify", cfg.SplitInsecureSkipVerify,
+			)
+		} else if cfg.IsSplitRemote() {
+			logger.Info("configuration split mode",
+				"mode", splitModeLabel,
+				"listen", cfg.SplitListen,
+			)
+		} else if cfg.IsSplitLocal() {
+			logger.Info("configuration split mode",
+				"mode", splitModeLabel,
+				"connect", cfg.SplitConnect,
+				"insecure_skip_verify", cfg.SplitInsecureSkipVerify,
+			)
+		}
+	}
+
 	var tlsConfig *tls.Config
 	if cfg.TLSCertFile != "" || cfg.TLSKeyFile != "" {
 		certificate, err := tls.LoadX509KeyPair(cfg.TLSCertFile, cfg.TLSKeyFile)
@@ -254,21 +299,58 @@ func main() {
 			MinVersion:   tls.VersionTLS12,
 		}
 	}
-	store, err := maildir.New(cfg.MaildirRoot)
-	if err != nil {
-		fatal("maildir initialization failed", "error", err)
-	}
-	mailboxes := make(map[string]bool)
-	for username := range cfg.Users {
-		mailbox, ok := cfg.Resolve(username)
-		if !ok {
-			continue
+
+	// Build split TLS config using the main TLS cert/key.
+	buildSplitTLSConfig := func() *tls.Config {
+		certificate, err := tls.LoadX509KeyPair(cfg.TLSCertFile, cfg.TLSKeyFile)
+		if err != nil {
+			fatal("split TLS certificate initialization failed", "error", err)
+			return nil
 		}
-		if !mailboxes[mailbox] {
-			if err := store.Ensure(mailbox); err != nil {
-				fatal("mailbox initialization failed", "user", username, "error", err)
+		tcp := &tls.Config{
+			Certificates: []tls.Certificate{certificate},
+			MinVersion:   tls.VersionTLS12,
+		}
+		if cfg.SplitCACertFile != "" {
+			caData, err := os.ReadFile(cfg.SplitCACertFile)
+			if err != nil {
+				fatal("split CA certificate read failed", "error", err)
+				return nil
 			}
-			mailboxes[mailbox] = true
+			caPool := x509.NewCertPool()
+			if !caPool.AppendCertsFromPEM(caData) {
+				fatal("split CA certificate parse failed")
+				return nil
+			}
+			tcp.ClientCAs = caPool
+			tcp.RootCAs = caPool
+			tcp.ClientAuth = tls.RequireAndVerifyClientCert
+		}
+		return tcp
+	}
+	var splitTLSConfig *tls.Config
+	if splitEnabled {
+		splitTLSConfig = buildSplitTLSConfig()
+	}
+	var store *maildir.Store
+	if !splitEnabled || !cfg.IsSplitRemote() {
+		var err error
+		store, err = maildir.New(cfg.MaildirRoot)
+		if err != nil {
+			fatal("maildir initialization failed", "error", err)
+		}
+		mailboxes := make(map[string]bool)
+		for username := range cfg.Users {
+			mailbox, ok := cfg.Resolve(username)
+			if !ok {
+				continue
+			}
+			if !mailboxes[mailbox] {
+				if err := store.Ensure(mailbox); err != nil {
+					fatal("mailbox initialization failed", "user", username, "error", err)
+				}
+				mailboxes[mailbox] = true
+			}
 		}
 	}
 
@@ -315,23 +397,85 @@ func main() {
 	authConfig.Logger = logger
 	authLimiter := auth.NewLimiter(authConfig)
 	var dkimSigner func(msg []byte) ([]byte, error)
-	if cfg.HasDKIM() {
-		signer, err := dkim.NewSigner(cfg.DKIM.Domain, cfg.DKIM.Selector, cfg.DKIM.PrivateKey, cfg.DKIM.PublicKey)
-		if err != nil {
-			fatal("DKIM initialization failed", "error", err)
+	if !isRemoteOnly {
+		if cfg.HasDKIM() {
+			signer, err := dkim.NewSigner(cfg.DKIM.Domain, cfg.DKIM.Selector, cfg.DKIM.PrivateKey, cfg.DKIM.PublicKey)
+			if err != nil {
+				fatal("DKIM initialization failed", "error", err)
+			}
+			signer.SetLogger(logger)
+			dkimSigner = signer.Sign
+			logger.Info("DKIM key pair validated", "domain", cfg.DKIM.Domain, "selector", signer.Selector())
+			logger.Info("DKIM signing enabled", "domain", cfg.DKIM.Domain, "selector", signer.Selector())
+		} else {
+			logger.Info("DKIM signing disabled")
 		}
-		signer.SetLogger(logger)
-		dkimSigner = signer.Sign
-		logger.Info("DKIM key pair validated", "domain", cfg.DKIM.Domain, "selector", signer.Selector())
-		logger.Info("DKIM signing enabled", "domain", cfg.DKIM.Domain, "selector", signer.Selector())
-	} else {
-		logger.Info("DKIM signing disabled")
 	}
+	// --- Split mode: set up the TLS link between local and remote sides. ---
+	var splitClient *split.Client
+	if splitEnabled && cfg.IsSplitLocal() {
+		clientTLSConfig := splitTLSConfig.Clone()
+		if cfg.SplitInsecureSkipVerify {
+			clientTLSConfig.InsecureSkipVerify = true
+			logger.Warn("split remote certificate verification disabled", "address", cfg.SplitConnect)
+		}
+		splitClient = &split.Client{
+			Addr:      cfg.SplitConnect,
+			TLSConfig: clientTLSConfig,
+			Logger:    logger,
+		}
+	}
+
+	// Remote-side mailbox cache: populated dynamically when the local connects.
+	// The remote uses this to decide which incoming SMTP recipients should be
+	// forwarded back to the local side.
+	var remoteMailboxesMu sync.Mutex
+	var remoteMailboxes map[string]bool // address -> true
+
 	newSMTPServer := func(addr string, startTLSConfig *tls.Config, requireSTARTTLS bool) *smtp.Server {
-		return &smtp.Server{
+		srv := &smtp.Server{
 			Addr: addr, StartTLSConfig: startTLSConfig, RequireSTARTTLS: requireSTARTTLS, Hostname: cfg.Hostname, Store: store,
 			Processors: processors, Resolve: resolve, LocalDomain: localDomain, DKIMSigner: dkimSigner, Authenticate: authenticate, AuthLimiter: authLimiter, Logger: logger,
 		}
+		// Remote role: resolve uses the dynamic mailbox cache from the local side.
+		if splitEnabled && cfg.IsSplitRemote() {
+			srv.Resolve = func(address string) (string, bool) {
+				address = strings.ToLower(strings.TrimSpace(address))
+				remoteMailboxesMu.Lock()
+				defer remoteMailboxesMu.Unlock()
+				if remoteMailboxes == nil {
+					return "", false
+				}
+				if remoteMailboxes[address] {
+					return address, true
+				}
+				// Also check the local part before the @.
+				if at := strings.IndexByte(address, '@'); at > 0 {
+					if remoteMailboxes[address[:at]] {
+						return address[:at], true
+					}
+				}
+				return "", false
+			}
+			srv.LocalDomain = func(domain string) bool {
+				// Remote considers a domain local if any cached mailbox belongs to it.
+				remoteMailboxesMu.Lock()
+				defer remoteMailboxesMu.Unlock()
+				if remoteMailboxes == nil {
+					return false
+				}
+				domain = strings.ToLower(strings.TrimSuffix(domain, "."))
+				for addr := range remoteMailboxes {
+					if at := strings.IndexByte(addr, '@'); at > 0 {
+						if strings.TrimSuffix(addr[at+1:], ".") == domain {
+							return true
+						}
+					}
+				}
+				return false
+			}
+		}
+		return srv
 	}
 	newIMAPServer := func(addr string, config *tls.Config) *imap.Server {
 		return &imap.Server{
@@ -346,9 +490,115 @@ func main() {
 	if cfg.SMTPCleartextListen != "" {
 		smtpServers = append(smtpServers, newSMTPServer(cfg.SMTPCleartextListen, nil, false))
 	}
-	imapServers := []*imap.Server{newIMAPServer(cfg.IMAPListen, nil)}
-	if cfg.IMAPTLSListen != "" {
-		imapServers = append(imapServers, newIMAPServer(cfg.IMAPTLSListen, tlsConfig.Clone()))
+	if splitClient != nil {
+		splitClient.Deliver = func(ctx context.Context, req split.SendRequest) error {
+			return smtpServers[0].DeliverLocal(ctx, req.From, req.Recipient, req.Data)
+		}
+	}
+
+	// Split server: only created when this instance listens for split connections
+	// (remote role). The local role only connects out, it doesn't listen.
+	var splitSrv *split.Server
+	if splitEnabled && cfg.IsSplitRemote() {
+		// Build the split server Deliver callback.
+		// Remote side: receives mail from local for external SMTP relay.
+		splitDeliver := func(ctx context.Context, req split.SendRequest) error {
+			server := smtpServers[0]
+			return server.Relay(ctx, req.From, req.Recipient, req.Data)
+		}
+		splitSrv = &split.Server{
+			Addr:             cfg.SplitListen,
+			TLSConfig:        splitTLSConfig.Clone(),
+			Logger:           logger,
+			Deliver:          splitDeliver,
+			ExpectedClientDN: cfg.SplitLocalClientDN,
+		}
+	}
+
+	// Wire split forwarding into SMTP servers.
+	if splitEnabled && cfg.IsSplitLocal() {
+		for _, srv := range smtpServers {
+			// Local side: forward non-local mail to remote when connected;
+			// fall back to direct MX relay when the remote is not connected.
+			srv.SplitForward = func(ctx context.Context, from, recipient string, data []byte, fallback func(context.Context, string, string, []byte) error) error {
+				if splitClient.IsConnected() {
+					data = srv.SignDKIM(from, recipient, data)
+					return splitClient.Send(ctx, split.SendRequest{
+						From:      from,
+						Recipient: recipient,
+						Data:      data,
+					})
+				}
+				logger.Info("split remote not connected, falling back to MX relay", "recipient", recipient)
+				return fallback(ctx, from, recipient, data)
+			}
+		}
+	} else if splitEnabled && cfg.IsSplitRemote() {
+		for _, srv := range smtpServers {
+			// Remote side: forward mail for local mailboxes back to local
+			// over the accepted split connection, and relay external mail via MX.
+			srv.SplitForward = func(ctx context.Context, from, recipient string, data []byte, fallback func(context.Context, string, string, []byte) error) error {
+				if _, ok := srv.Resolve(recipient); !ok {
+					return fallback(ctx, from, recipient, data)
+				}
+				return splitSrv.Send(ctx, split.SendRequest{From: from, Recipient: recipient, Data: data})
+			}
+		}
+	}
+
+	// Remote-side split callbacks: manage mailbox cache and SMTP forwarding.
+	if splitEnabled && cfg.IsSplitRemote() {
+		splitSrv.OnMailboxList = func(addresses []string) {
+			remoteMailboxesMu.Lock()
+			remoteMailboxes = make(map[string]bool, len(addresses))
+			for _, addr := range addresses {
+				remoteMailboxes[strings.ToLower(strings.TrimSpace(addr))] = true
+			}
+			remoteMailboxesMu.Unlock()
+			logger.Info("remote mailbox cache refreshed", "count", len(addresses))
+		}
+		splitSrv.OnConnected = func() {
+			logger.Info("local connected to remote, resuming SMTP")
+		}
+		splitSrv.OnDisconnected = func() {
+			remoteMailboxesMu.Lock()
+			remoteMailboxes = nil
+			remoteMailboxesMu.Unlock()
+			logger.Info("local disconnected from remote, clearing mailbox cache")
+		}
+	}
+
+	// Local-side: after connecting, send the mailbox list to the remote.
+	if splitEnabled && cfg.IsSplitLocal() {
+		// Collect all local mailbox addresses (user + aliases).
+		localMailboxAddresses := make([]string, 0, len(cfg.Users))
+		for username, user := range cfg.Users {
+			localMailboxAddresses = append(localMailboxAddresses, username)
+			for _, alias := range user.Aliases {
+				localMailboxAddresses = append(localMailboxAddresses, alias)
+			}
+		}
+		// When the background reconnect loop establishes a connection, send the
+		// mailbox list to the remote.
+		splitClient.OnConnected = func() {
+			logger.Info("split connected, sending mailbox list to remote")
+			if err := splitClient.SendMailboxList(localMailboxAddresses); err != nil {
+				logger.Error("split mailbox list send failed", "error", err)
+			}
+		}
+		splitClient.OnDisconnected = func() {
+			logger.Info("split disconnected from remote")
+		}
+		// Start the background reconnect loop (retries every 10 seconds).
+		splitClient.Start(ctx)
+	}
+
+	var imapServers []*imap.Server
+	if !splitEnabled || !cfg.IsSplitRemote() {
+		imapServers = []*imap.Server{newIMAPServer(cfg.IMAPListen, nil)}
+		if cfg.IMAPTLSListen != "" {
+			imapServers = append(imapServers, newIMAPServer(cfg.IMAPTLSListen, tlsConfig.Clone()))
+		}
 	}
 
 	status := health.New(len(smtpServers), len(imapServers))
@@ -365,6 +615,9 @@ func main() {
 		fatal("health listener failed", "address", cfg.HealthListen, "error", err)
 	}
 	listenerCount := len(smtpServers) + len(imapServers) + 1
+	if splitSrv != nil {
+		listenerCount++ // split server
+	}
 	errorsCh := make(chan error, listenerCount)
 	var serviceWG sync.WaitGroup
 	for _, server := range smtpServers {
@@ -381,6 +634,13 @@ func main() {
 			errorsCh <- server.ListenAndServe(ctx)
 		}(server)
 	}
+	if splitEnabled && splitSrv != nil {
+		serviceWG.Add(1)
+		go func() {
+			defer serviceWG.Done()
+			errorsCh <- splitSrv.ListenAndServe(ctx)
+		}()
+	}
 	go func() {
 		if err := healthServer.Serve(healthListener); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			errorsCh <- err
@@ -395,6 +655,21 @@ func main() {
 		logger.Info("shutdown readiness disabled")
 		serviceWG.Wait()
 		logger.Info("protocol servers stopped")
+		// Wait for the split client background goroutine to exit, with a timeout
+		// so that a stuck dial or handshake does not hold up the entire shutdown.
+		if splitClient != nil {
+			doneCh := make(chan struct{})
+			go func() {
+				splitClient.Wait()
+				close(doneCh)
+			}()
+			select {
+			case <-doneCh:
+				logger.Info("split client stopped")
+			case <-time.After(5 * time.Second):
+				logger.Warn("split client shutdown timed out, forcing exit")
+			}
+		}
 		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer shutdownCancel()
 		logger.Info("health server shutdown started", "timeout", 5*time.Second)

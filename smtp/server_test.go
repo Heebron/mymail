@@ -44,6 +44,271 @@ type failingProcessor struct {
 	err error
 }
 
+func TestDeliverLocalStoresMailAndRejectsUnknownMailbox(t *testing.T) {
+	store, err := maildir.New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	splitCalls := 0
+	server := &Server{
+		Store: store,
+		Resolve: func(address string) (string, bool) {
+			return "alice", strings.EqualFold(address, "alice@example.test")
+		},
+		SplitForward: func(context.Context, string, string, []byte, func(context.Context, string, string, []byte) error) error {
+			splitCalls++
+			return nil
+		},
+		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}
+	data := []byte("Subject: split delivery\r\n\r\nbody")
+	if err := server.DeliverLocal(context.Background(), "sender@example.test", "alice@example.test", data); err != nil {
+		t.Fatal(err)
+	}
+	messages, err := store.List("alice")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(messages) != 1 {
+		t.Fatalf("stored messages = %d, want 1", len(messages))
+	}
+	if splitCalls != 0 {
+		t.Fatalf("SplitForward called %d times for local delivery, want 0", splitCalls)
+	}
+	if err := server.DeliverLocal(context.Background(), "sender@example.test", "missing@example.test", data); err == nil {
+		t.Fatal("DeliverLocal() for unknown mailbox succeeded, want error")
+	}
+}
+
+func TestRelayBypassesSplitForward(t *testing.T) {
+	splitCalls := 0
+	server := &Server{
+		Hostname: "mail.example.test",
+		SplitForward: func(context.Context, string, string, []byte, func(context.Context, string, string, []byte) error) error {
+			splitCalls++
+			return nil
+		},
+		LookupMX: func(context.Context, string) ([]*net.MX, error) {
+			return nil, fmt.Errorf("MX lookup unavailable")
+		},
+		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}
+	err := server.Relay(context.Background(), "sender@example.test", "recipient@example.test", []byte("message"))
+	if err == nil {
+		t.Fatal("Relay() succeeded with failing MX lookup, want error")
+	}
+	if splitCalls != 0 {
+		t.Fatalf("SplitForward called %d times, want 0", splitCalls)
+	}
+}
+
+func TestSignDKIMReturnsSignedOrOriginalMessage(t *testing.T) {
+	original := []byte("Subject: test\r\n\r\nbody")
+	signed := []byte("DKIM-Signature: test\r\nSubject: test\r\n\r\nbody")
+	server := &Server{
+		DKIMSigner: func([]byte) ([]byte, error) { return signed, nil },
+		Logger:     slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}
+	if got := server.SignDKIM("sender@example.test", "recipient@remote.test", original); !bytes.Equal(got, signed) {
+		t.Fatalf("SignDKIM() = %q, want signed message %q", got, signed)
+	}
+	server.DKIMSigner = func([]byte) ([]byte, error) { return nil, fmt.Errorf("signing failed") }
+	if got := server.SignDKIM("sender@example.test", "recipient@remote.test", original); !bytes.Equal(got, original) {
+		t.Fatalf("SignDKIM() after signer error = %q, want original message %q", got, original)
+	}
+	server.DKIMSigner = nil
+	if got := server.SignDKIM("sender@example.test", "recipient@remote.test", original); !bytes.Equal(got, original) {
+		t.Fatalf("SignDKIM() without signer = %q, want original message %q", got, original)
+	}
+}
+
+func TestRelayDoesNotSignDKIM(t *testing.T) {
+	relayServer, relayClient := net.Pipe()
+	defer relayClient.Close()
+	if err := relayServer.SetDeadline(time.Now().Add(5 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	relayedData := make(chan string, 1)
+	relayErrors := make(chan error, 1)
+	go func() {
+		defer relayServer.Close()
+		reader := bufio.NewReader(relayServer)
+		writeLine := func(line string) error {
+			_, err := io.WriteString(relayServer, line+"\r\n")
+			return err
+		}
+		readExpected := func(want string) error {
+			line, err := reader.ReadString('\n')
+			if err != nil {
+				return err
+			}
+			if strings.TrimRight(line, "\r\n") != want {
+				return fmt.Errorf("SMTP command = %q, want %q", strings.TrimRight(line, "\r\n"), want)
+			}
+			return nil
+		}
+		if err := writeLine("220 mx.remote.test ESMTP"); err != nil {
+			relayErrors <- err
+			return
+		}
+		for _, exchange := range []struct{ command, response string }{
+			{"EHLO mail.example.test", "250 mx.remote.test"},
+			{"MAIL FROM:<sender@example.test>", "250 sender ok"},
+			{"RCPT TO:<recipient@remote.test>", "250 recipient ok"},
+			{"DATA", "354 continue"},
+		} {
+			if err := readExpected(exchange.command); err != nil {
+				relayErrors <- err
+				return
+			}
+			if err := writeLine(exchange.response); err != nil {
+				relayErrors <- err
+				return
+			}
+		}
+		var data strings.Builder
+		for {
+			line, err := reader.ReadString('\n')
+			if err != nil {
+				relayErrors <- err
+				return
+			}
+			if line == ".\r\n" {
+				break
+			}
+			data.WriteString(line)
+		}
+		if err := writeLine("250 queued"); err != nil {
+			relayErrors <- err
+			return
+		}
+		if err := readExpected("QUIT"); err != nil {
+			relayErrors <- err
+			return
+		}
+		relayedData <- data.String()
+		relayErrors <- nil
+	}()
+
+	signerCalls := 0
+	server := &Server{
+		Hostname: "mail.example.test",
+		LookupMX: func(context.Context, string) ([]*net.MX, error) {
+			return []*net.MX{{Host: "mx.remote.test", Pref: 10}}, nil
+		},
+		DialSMTP: func(context.Context, string) (net.Conn, error) { return relayClient, nil },
+		DKIMSigner: func(data []byte) ([]byte, error) {
+			signerCalls++
+			return append([]byte("DKIM-Signature: unexpected\r\n"), data...), nil
+		},
+		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}
+	message := []byte("Subject: relay test\r\n\r\nbody\r\n")
+	if err := server.Relay(context.Background(), "sender@example.test", "recipient@remote.test", message); err != nil {
+		t.Fatalf("Relay() error = %v", err)
+	}
+	if err := <-relayErrors; err != nil {
+		t.Fatal(err)
+	}
+	if signerCalls != 0 {
+		t.Fatalf("DKIM signer called %d times by Relay(), want 0", signerCalls)
+	}
+	got := <-relayedData
+	if strings.Contains(got, "DKIM-Signature:") {
+		t.Fatalf("relayed message was DKIM-signed: %q", got)
+	}
+	if !strings.Contains(got, "Subject: relay test") {
+		t.Fatalf("relayed message missing original content: %q", got)
+	}
+}
+
+func TestSMTPStoresLocalMailboxWhenSplitForwardConfigured(t *testing.T) {
+	store, err := maildir.New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	splitCalls := 0
+	server := &Server{
+		Hostname: "mail.example.test",
+		Store:    store,
+		Resolve: func(address string) (string, bool) {
+			return "alice", strings.EqualFold(address, "alice@example.test")
+		},
+		SplitForward: func(context.Context, string, string, []byte, func(context.Context, string, string, []byte) error) error {
+			splitCalls++
+			return nil
+		},
+		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}
+	serverConn, clientConn := net.Pipe()
+	defer clientConn.Close()
+	if err := clientConn.SetDeadline(time.Now().Add(5 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	go server.handle(context.Background(), serverConn)
+	reader := bufio.NewReader(clientConn)
+	readLine := func() string {
+		t.Helper()
+		line, err := reader.ReadString('\n')
+		if err != nil {
+			t.Fatal(err)
+		}
+		return strings.TrimRight(line, "\r\n")
+	}
+	readReply := func() string {
+		line := readLine()
+		for len(line) > 3 && line[3] == '-' {
+			line = readLine()
+		}
+		return line
+	}
+	write := func(command string) {
+		t.Helper()
+		if _, err := io.WriteString(clientConn, command+"\r\n"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := readReply(); !strings.HasPrefix(got, "220 ") {
+		t.Fatalf("greeting = %q", got)
+	}
+	write("EHLO localhost")
+	if got := readReply(); !strings.HasPrefix(got, "250 ") {
+		t.Fatalf("EHLO response = %q", got)
+	}
+	write("MAIL FROM:<sender@example.test>")
+	if got := readReply(); !strings.HasPrefix(got, "250 ") {
+		t.Fatalf("MAIL response = %q", got)
+	}
+	write("RCPT TO:<alice@example.test>")
+	if got := readReply(); !strings.HasPrefix(got, "250 ") {
+		t.Fatalf("RCPT response = %q", got)
+	}
+	write("DATA")
+	if got := readReply(); !strings.HasPrefix(got, "354 ") {
+		t.Fatalf("DATA response = %q", got)
+	}
+	if _, err := io.WriteString(clientConn, "From: sender@example.test\r\nTo: alice@example.test\r\nSubject: split local\r\n\r\nbody\r\n.\r\n"); err != nil {
+		t.Fatal(err)
+	}
+	if got := readReply(); !strings.HasPrefix(got, "250 ") {
+		t.Fatalf("delivery response = %q", got)
+	}
+	write("QUIT")
+	if got := readReply(); !strings.HasPrefix(got, "221 ") {
+		t.Fatalf("QUIT response = %q", got)
+	}
+	messages, err := store.List("alice")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(messages) != 1 {
+		t.Fatalf("stored messages = %d, want 1", len(messages))
+	}
+	if splitCalls != 0 {
+		t.Fatalf("SplitForward called %d times for local SMTP delivery, want 0", splitCalls)
+	}
+}
+
 func (p *countingProcessor) Name() string { return "counting" }
 
 func (p *countingProcessor) Initialize(context.Context, map[string]string) error { return nil }

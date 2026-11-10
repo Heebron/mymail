@@ -14,12 +14,18 @@ DIST_DIR ?= dist
 
 BINARIES := mymail mymail-send mymail-password mymail-dkim
 UPX_FLAGS ?= --best --lzma
+GO_SOURCES := $(shell find . -path ./$(DIST_DIR) -prune -o -name '*.go' -print)
 
 .PHONY: all build image push spamd-image spamd-push compress windows mac raspberry-pi risc-v test vet fmt clean
 
 all: build
 
 build: $(BINARIES)
+
+mymail: $(GO_SOURCES)
+mymail-send: $(GO_SOURCES)
+mymail-password: $(GO_SOURCES)
+mymail-dkim: $(GO_SOURCES)
 
 image:
 	docker build --build-arg VERSION="$(VERSION)" --build-arg BUILT_ON="$(BUILT_ON)" --tag $(IMAGE_TAG) .

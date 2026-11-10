@@ -1,4 +1,8 @@
 # Send only the Go sources required to build the server image.
+#
+# IMPORTANT: This file uses an allowlist pattern. Every new Go package
+# must be explicitly listed below, or it will be excluded from the
+# Docker build and compilation will fail.
 *
 !go.mod
 !go.sum
@@ -23,3 +27,5 @@
 !plugins/**
 !smtp/
 !smtp/**
+!split/
+!split/**

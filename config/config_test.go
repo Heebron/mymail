@@ -90,6 +90,49 @@ users:
 	}
 }
 
+func TestValidateSplitConfigInsecureSkipVerifyRequiresConnect(t *testing.T) {
+	cfg := Config{
+		SplitListen:             "127.0.0.1:1783",
+		SplitInsecureSkipVerify: true,
+	}
+	err := validateSplitConfig(&cfg)
+	if err == nil || !strings.Contains(err.Error(), "split_insecure_skip_verify requires split_connect") {
+		t.Fatalf("validateSplitConfig() error = %v, want split_connect requirement", err)
+	}
+}
+
+func TestValidateDKIMOnlyOnSplitLocalSide(t *testing.T) {
+	remote := Defaults()
+	remote.SplitMode = "on"
+	remote.SplitListen = "127.0.0.1:1783"
+	remote.TLSCertFile = "tls.crt"
+	remote.TLSKeyFile = "tls.key"
+	remote.DKIM.Domain = "example.test"
+	err := remote.Validate()
+	if err == nil || !strings.Contains(err.Error(), "remote role should not configure dkim") {
+		t.Fatalf("remote Validate() error = %v, want DKIM role restriction", err)
+	}
+
+	privateKey, publicKey := generateTestRSAKey(t)
+	combined := Defaults()
+	combined.SplitMode = "on"
+	combined.SplitListen = "127.0.0.1:1783"
+	combined.SplitConnect = "127.0.0.1:1784"
+	combined.TLSCertFile = "tls.crt"
+	combined.TLSKeyFile = "tls.key"
+	combined.MaildirRoot = t.TempDir()
+	combined.Users = map[string]User{"alice@example.test": {Password: "secret"}}
+	combined.DKIM = DKIMConfig{
+		Domain:     "example.test",
+		PrivateKey: privateKey,
+		PublicKey:  publicKey,
+		Selector:   "default",
+	}
+	if err := combined.Validate(); err != nil {
+		t.Fatalf("combined local,remote Validate() error = %v", err)
+	}
+}
+
 func TestLoadYAMLPluginConfigurationIsOptionalAndOrdered(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.yaml")
 	contents := []byte(`plugins:

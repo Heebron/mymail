@@ -90,6 +90,34 @@ type Config struct {
 	Plugins []PluginConfig `yaml:"plugins,omitempty"`
 	// Users maps login addresses to mailbox and authentication settings.
 	Users map[string]User `yaml:"users"`
+	// SplitMode enables split operation when set to "on". In split mode the
+	// daemon runs as either the "local" side (behind the ISP firewall, serving
+	// IMAP) or the "remote" side (in cloud infrastructure, handling external
+	// SMTP delivery). The two sides communicate over a TLS link.
+	SplitMode string `yaml:"split_mode,omitempty"`
+	// SplitListen is the TCP address the split TLS listener binds to. When set,
+	// this instance acts as the "remote" side (accepts connections from the
+	// local side). Either split_listen or split_connect is required when
+	// split_mode is "on"; both can be set for full bidirectional operation.
+	SplitListen string `yaml:"split_listen,omitempty"`
+	// SplitConnect is the TCP address of the peer split server. When set, this
+	// instance acts as the "local" side (connects to the remote to forward
+	// non-local mail). A local-only instance works normally even when the
+	// remote is unreachable, falling back to direct MX relay.
+	SplitConnect string `yaml:"split_connect,omitempty"`
+	// SplitCACertFile is an optional CA certificate file used to verify the
+	// peer's certificate on the split link. If omitted, the system pool is
+	// used.
+	SplitCACertFile string `yaml:"split_ca_cert_file,omitempty"`
+	// SplitInsecureSkipVerify disables certificate verification for the remote
+	// peer on the local side's outbound split connection.
+	SplitInsecureSkipVerify bool `yaml:"split_insecure_skip_verify,omitempty"`
+	// SplitLocalClientDN is the expected X.509 subject DN of the local side's
+	// client certificate. When set on the remote, the split connection is
+	// rejected unless the connecting client's certificate subject matches
+	// exactly. This provides an additional layer of authentication beyond
+	// mutual TLS.
+	SplitLocalClientDN string `yaml:"split_local_client_dn,omitempty"`
 }
 
 // Defaults returns the configuration defaults used before YAML values are
@@ -147,6 +175,11 @@ func (c *Config) expandEnvironment() {
 	if c.DKIM.PublicKey == "" && c.DKIM.PublicKeyFile != "" {
 		c.DKIM.PublicKey = c.DKIM.PublicKeyFile
 	}
+	c.SplitMode = expandEnvironment(c.SplitMode)
+	c.SplitListen = expandEnvironment(c.SplitListen)
+	c.SplitConnect = expandEnvironment(c.SplitConnect)
+	c.SplitCACertFile = expandEnvironment(c.SplitCACertFile)
+	c.SplitLocalClientDN = expandEnvironment(c.SplitLocalClientDN)
 	for username, user := range c.Users {
 		user.Password = expandEnvironment(user.Password)
 		user.PasswordSHA256 = expandEnvironment(user.PasswordSHA256)
@@ -180,16 +213,34 @@ func (c *Config) HasDKIM() bool {
 
 // Validate checks listener, TLS, authentication, mailbox, and user settings.
 func (c *Config) Validate() error {
-	if strings.TrimSpace(c.SMTPListen) == "" || strings.TrimSpace(c.IMAPListen) == "" {
-		return errors.New("smtp_listen and imap_listen are required")
+	splitEnabled := strings.TrimSpace(c.SplitMode) == "on"
+	if splitEnabled {
+		if err := validateSplitConfig(c); err != nil {
+			return err
+		}
+	}
+	if splitEnabled && c.IsSplitRemote() {
+		// Remote side does not need IMAP; only SMTP is required.
+		if strings.TrimSpace(c.SMTPListen) == "" {
+			return errors.New("smtp_listen is required for split remote role")
+		}
+	} else {
+		if strings.TrimSpace(c.SMTPListen) == "" || strings.TrimSpace(c.IMAPListen) == "" {
+			return errors.New("smtp_listen and imap_listen are required")
+		}
 	}
 	hasTLSListener := strings.TrimSpace(c.IMAPTLSListen) != ""
 	hasTLSFiles := strings.TrimSpace(c.TLSCertFile) != "" || strings.TrimSpace(c.TLSKeyFile) != ""
 	if (hasTLSListener || hasTLSFiles || c.SMTPRequireSTARTTLS || c.IMAPRequireSTARTTLS) && (strings.TrimSpace(c.TLSCertFile) == "" || strings.TrimSpace(c.TLSKeyFile) == "") {
 		return errors.New("tls_cert_file and tls_key_file must be configured together")
 	}
-	if strings.TrimSpace(c.MaildirRoot) == "" || strings.TrimSpace(c.Hostname) == "" {
-		return errors.New("maildir_root and hostname are required")
+	if strings.TrimSpace(c.Hostname) == "" {
+		return errors.New("hostname is required")
+	}
+	if !splitEnabled || !c.IsSplitRemote() {
+		if strings.TrimSpace(c.MaildirRoot) == "" {
+			return errors.New("maildir_root is required")
+		}
 	}
 	hasDKIMDomain := strings.TrimSpace(c.DKIM.Domain) != ""
 	hasDKIMPriv := strings.TrimSpace(c.DKIM.PrivateKey) != ""
@@ -197,6 +248,9 @@ func (c *Config) Validate() error {
 	hasDKIMSelector := strings.TrimSpace(c.DKIM.Selector) != ""
 	hasAnyDKIM := hasDKIMDomain || hasDKIMPriv || hasDKIMPub || hasDKIMSelector
 	hasAllDKIM := hasDKIMDomain && hasDKIMPriv && hasDKIMPub && hasDKIMSelector
+	if splitEnabled && c.IsSplitRemote() && !c.IsSplitLocal() && hasAnyDKIM {
+		return errors.New("remote role should not configure dkim; the local side signs outgoing mail")
+	}
 	if hasAnyDKIM && !hasAllDKIM {
 		return errors.New("dkim domain, private_key, public_key, and selector must be configured together")
 	}
@@ -229,7 +283,11 @@ func (c *Config) Validate() error {
 		}
 		pluginNames[name] = struct{}{}
 	}
-	if len(c.Users) == 0 {
+	if splitEnabled && c.IsSplitRemote() && !c.IsSplitLocal() {
+		if len(c.Users) > 0 {
+			return errors.New("remote role should not define users; they are learned dynamically from the local side")
+		}
+	} else if len(c.Users) == 0 {
 		return errors.New("at least one user is required")
 	}
 	primaryUsers := make(map[string]string, len(c.Users))
@@ -267,6 +325,34 @@ func (c *Config) Validate() error {
 			}
 			aliases[key] = username
 		}
+	}
+	return nil
+}
+
+// IsSplitRemote reports whether this instance acts as the remote side
+// (accepts split connections). It is true when split_listen is configured.
+func (c *Config) IsSplitRemote() bool {
+	return strings.TrimSpace(c.SplitListen) != ""
+}
+
+// IsSplitLocal reports whether this instance acts as the local side
+// (initiates split connections). It is true when split_connect is configured.
+func (c *Config) IsSplitLocal() bool {
+	return strings.TrimSpace(c.SplitConnect) != ""
+}
+
+func validateSplitConfig(c *Config) error {
+	listen := strings.TrimSpace(c.SplitListen)
+	connect := strings.TrimSpace(c.SplitConnect)
+	if c.SplitInsecureSkipVerify && connect == "" {
+		return errors.New("split_insecure_skip_verify requires split_connect")
+	}
+	if listen == "" && connect == "" {
+		return errors.New("split_listen or split_connect is required when split_mode is 'on'")
+	}
+	// Check that TLS cert/key are provided for the split link.
+	if strings.TrimSpace(c.TLSCertFile) == "" || strings.TrimSpace(c.TLSKeyFile) == "" {
+		return errors.New("split mode requires tls_cert_file and tls_key_file")
 	}
 	return nil
 }

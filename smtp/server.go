@@ -42,6 +42,13 @@ type SMTPDialer func(context.Context, string) (net.Conn, error)
 // Authenticator verifies SMTP credentials.
 type Authenticator func(username, password string) bool
 
+// SplitForwarder sends a message to a peer split server. When non-nil, the
+// SMTP server uses this instead of direct MX relay for non-local recipients
+// (local role) or for local-mailbox recipients (remote role).
+// The fallback argument is a function that performs the default MX-based
+// relay; the SplitForwarder may call it when the split link is unavailable.
+type SplitForwarder func(ctx context.Context, from, recipient string, data []byte, fallback func(ctx context.Context, from, recipient string, data []byte) error) error
+
 // Server receives SMTP messages, delivers local mail, and forwards external
 // recipients after authentication.
 type Server struct {
@@ -77,17 +84,23 @@ type Server struct {
 	// it is nil.
 	Logger *slog.Logger
 	// OnReady is called after the listener starts accepting connections.
-	OnReady  func()
-	activeMu sync.Mutex
-	active   map[net.Conn]struct{}
-	activeWG sync.WaitGroup
+	OnReady func()
+	// SplitForward, when non-nil, replaces the default MX-based forwarding.
+	// It is used in split mode to send mail over the TLS link to the peer.
+	SplitForward SplitForwarder
+	activeMu     sync.Mutex
+	active       map[net.Conn]struct{}
+	activeWG     sync.WaitGroup
 }
 
 // ListenAndServe listens until ctx is canceled or the listener fails. Active
 // connections are closed during shutdown before the method returns.
 func (s *Server) ListenAndServe(ctx context.Context) error {
-	if s.Store == nil || s.Resolve == nil {
-		return errors.New("smtp server requires a store and recipient resolver")
+	if s.Resolve == nil {
+		return errors.New("smtp server requires a recipient resolver")
+	}
+	if s.Store == nil && s.SplitForward == nil {
+		return errors.New("smtp server requires a store or SplitForward")
 	}
 	if s.Hostname == "" {
 		s.Hostname = "localhost"
@@ -390,8 +403,15 @@ func (s *Server) handle(ctx context.Context, conn net.Conn) {
 			mailbox, exists := s.Resolve(address)
 			if exists {
 				tx.recipients = append(tx.recipients, address)
-				tx.mailboxes = append(tx.mailboxes, mailbox)
-				logger.Info("SMTP recipient accepted", "remote_addr", remoteAddr, "recipient", address, "route", "local", "mailbox", mailbox)
+				// A remote split instance has no local store, so local mailbox
+				// recipients are returned to the local side over the split link.
+				if s.Store == nil && s.SplitForward != nil {
+					tx.forward = append(tx.forward, address)
+					logger.Info("SMTP recipient accepted", "remote_addr", remoteAddr, "recipient", address, "route", "split-forward", "mailbox", mailbox)
+				} else {
+					tx.mailboxes = append(tx.mailboxes, mailbox)
+					logger.Info("SMTP recipient accepted", "remote_addr", remoteAddr, "recipient", address, "route", "local", "mailbox", mailbox)
+				}
 			} else if domain, ok := recipientDomain(address); ok && s.LocalDomain != nil && !s.LocalDomain(domain) {
 				if !authenticated {
 					logger.Warn("SMTP recipient rejected", "remote_addr", remoteAddr, "recipient", address, "reason", "authentication required for forwarding")
@@ -429,7 +449,7 @@ func (s *Server) handle(ctx context.Context, conn net.Conn) {
 			logger.Info("SMTP message received", "remote_addr", remoteAddr, "from", tx.from, "to", tx.recipients, "subject", messageSubject(data), "sender", tx.from, "recipients", len(tx.recipients), "bytes", len(data))
 			result := plugins.Result{Decision: plugins.Accept}
 			var deliveries []localDelivery
-			if len(tx.mailboxes) > 0 {
+			if len(tx.mailboxes) > 0 && s.Store != nil {
 				deliveries, result = s.processLocalRecipients(ctx, tx, data, remoteAddr)
 			}
 			switch result.Decision {
@@ -490,14 +510,83 @@ func (s *Server) deliverProcessed(ctx context.Context, tx transaction, deliverie
 		s.logger().Info("SMTP local delivery completed", "mailbox", delivery.mailbox, "folder", delivery.message.Folder, "filename", delivered.Filename, "bytes", len(delivery.message.Data))
 	}
 	for _, recipient := range tx.forward {
-		if err := s.forward(ctx, tx.from, recipient, forwardData); err != nil {
-			return err
+		if s.SplitForward != nil {
+			fallback := func(ctx context.Context, from, recipient string, data []byte) error {
+				return s.forward(ctx, from, recipient, data)
+			}
+			if err := s.SplitForward(ctx, tx.from, recipient, forwardData, fallback); err != nil {
+				return err
+			}
+		} else {
+			if err := s.forward(ctx, tx.from, recipient, forwardData); err != nil {
+				return err
+			}
 		}
 	}
 	return nil
 }
 
+// Relay forwards a message to an external recipient using the configured MX
+// lookup and SMTP relay path.
+func (s *Server) Relay(ctx context.Context, from, recipient string, data []byte) error {
+	return s.relayMX(ctx, from, recipient, data)
+}
+
+// DeliverLocal processes and stores a message for a local mailbox. It is used
+// by the local side when receiving mail over the split link.
+func (s *Server) DeliverLocal(ctx context.Context, from, recipient string, data []byte) error {
+	if s.Store == nil {
+		return errors.New("local delivery store is not configured")
+	}
+	if s.Resolve == nil {
+		return errors.New("local recipient resolver is not configured")
+	}
+	mailbox, ok := s.Resolve(recipient)
+	if !ok {
+		return fmt.Errorf("unknown local mailbox %s", recipient)
+	}
+	tx := transaction{
+		started:    true,
+		from:       from,
+		recipients: []string{recipient},
+		mailboxes:  []string{mailbox},
+	}
+	deliveries, result := s.processLocalRecipients(ctx, tx, data, "split")
+	switch result.Decision {
+	case plugins.Accept:
+		return s.deliverProcessed(ctx, transaction{from: from}, deliveries, data)
+	case plugins.Discard:
+		return nil
+	case plugins.Reject:
+		return fmt.Errorf("local delivery rejected: %s", cleanReason(result.Reason, "message rejected"))
+	case plugins.TemporaryFailure:
+		return fmt.Errorf("local delivery temporarily failed: %s", cleanReason(result.Reason, "message processing temporarily unavailable"))
+	default:
+		return errors.New("local delivery processor returned invalid decision")
+	}
+}
+
 func (s *Server) forward(ctx context.Context, from, recipient string, data []byte) error {
+	return s.relayMX(ctx, from, recipient, s.SignDKIM(from, recipient, data))
+}
+
+// SignDKIM adds a DKIM signature when configured. If signing fails, it logs
+// the failure and returns the original message.
+func (s *Server) SignDKIM(from, recipient string, data []byte) []byte {
+	if s.DKIMSigner == nil {
+		return data
+	}
+	domain, _ := recipientDomain(recipient)
+	signed, err := s.DKIMSigner(data)
+	if err != nil {
+		s.logger().Warn("SMTP DKIM signing failed", "domain", domain, "recipient", recipient, "sender", from, "error", err)
+		return data
+	}
+	s.logger().Info("SMTP DKIM signature added", "domain", domain, "recipient", recipient, "sender", from)
+	return signed
+}
+
+func (s *Server) relayMX(ctx context.Context, from, recipient string, data []byte) error {
 	domain, ok := recipientDomain(recipient)
 	if !ok {
 		return errors.New("invalid forwarding recipient")
@@ -517,16 +606,6 @@ func (s *Server) forward(ctx context.Context, from, recipient string, data []byt
 	}
 	records = append([]*net.MX(nil), records...)
 	sort.SliceStable(records, func(i, j int) bool { return records[i].Pref < records[j].Pref })
-	forwardData := data
-	if s.DKIMSigner != nil {
-		signed, err := s.DKIMSigner(data)
-		if err != nil {
-			s.logger().Warn("SMTP DKIM signing failed", "domain", domain, "recipient", recipient, "sender", from, "error", err)
-		} else {
-			forwardData = signed
-			s.logger().Info("SMTP DKIM signature added", "domain", domain, "recipient", recipient, "sender", from)
-		}
-	}
 	var lastErr error
 	for _, record := range records {
 		host := strings.TrimSuffix(strings.TrimSpace(record.Host), ".")
@@ -540,10 +619,10 @@ func (s *Server) forward(ctx context.Context, from, recipient string, data []byt
 			lastErr = dialErr
 			continue
 		}
-		err = relaySMTP(connection, s.Hostname, from, recipient, forwardData)
+		err = relaySMTP(connection, s.Hostname, from, recipient, data)
 		_ = connection.Close()
 		if err == nil {
-			s.logger().Info("SMTP forwarding completed", "domain", domain, "recipient", recipient, "mx_host", host, "bytes", len(forwardData))
+			s.logger().Info("SMTP forwarding completed", "domain", domain, "recipient", recipient, "mx_host", host, "bytes", len(data))
 			return nil
 		}
 		s.logger().Warn("SMTP forwarding attempt failed", "domain", domain, "recipient", recipient, "mx_host", host, "error", err)
