@@ -142,7 +142,9 @@ from this server:
 
 ```text
 example.com. TXT "v=spf1 ip4:<PUBLIC_IP> -all"
+@ example.com. TXT "v=spf1 ip4:<PUBLIC_IP> ~all"
 ```
+The '~' indicates send a warning, not just deny.
 
 If an outbound relay is used, publish the relay provider's prescribed SPF
 `include` instead of, or in addition to, the server IP. Keep one SPF record per
