@@ -273,3 +273,7 @@ Passing these checks makes the service correctly identifiable and safer to
 operate; it cannot guarantee acceptance by every recipient provider. Delivery
 decisions also depend on IP reputation, message content, recipient policy, and
 the sender-authentication results observed by each provider.
+
+# Checking
+
+Send an email to: check-auth@verifier.port25.com
