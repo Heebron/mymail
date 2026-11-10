@@ -74,6 +74,9 @@ type Server struct {
 	// DialSMTP connects to an external MX host. A 30-second dialer is used when
 	// it is nil.
 	DialSMTP SMTPDialer
+	// RelayNetwork selects the address family for outbound MX connections.
+	// It defaults to "tcp" when empty.
+	RelayNetwork string
 	// DKIMSigner signs outgoing email messages before forwarding when non-nil.
 	DKIMSigner func(msg []byte) ([]byte, error)
 	// Authenticate verifies SMTP login credentials.
@@ -205,6 +208,16 @@ func messageSubject(data []byte) string {
 		return subject
 	}
 	return decoded
+}
+
+// MessageID returns the message's Message-ID header, or an empty string when
+// the message has no parseable headers or Message-ID.
+func MessageID(data []byte) string {
+	message, err := mail.ReadMessage(bytes.NewReader(data))
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(message.Header.Get("Message-ID"))
 }
 
 type transaction struct {
@@ -446,7 +459,7 @@ func (s *Server) handle(ctx context.Context, conn net.Conn) {
 				tx = transaction{}
 				continue
 			}
-			logger.Info("SMTP message received", "remote_addr", remoteAddr, "from", tx.from, "to", tx.recipients, "subject", messageSubject(data), "sender", tx.from, "recipients", len(tx.recipients), "bytes", len(data))
+			logger.Info("SMTP message received", "remote_addr", remoteAddr, "from", tx.from, "to", tx.recipients, "subject", messageSubject(data), "message_id", MessageID(data), "sender", tx.from, "recipients", len(tx.recipients), "bytes", len(data))
 			result := plugins.Result{Decision: plugins.Accept}
 			var deliveries []localDelivery
 			if len(tx.mailboxes) > 0 && s.Store != nil {
@@ -502,6 +515,7 @@ func (s *Server) deliver(ctx context.Context, tx transaction, message *plugins.M
 }
 
 func (s *Server) deliverProcessed(ctx context.Context, tx transaction, deliveries []localDelivery, forwardData []byte) error {
+	s.warnIfForwardingSenderIsExternal(tx, forwardData)
 	for _, delivery := range deliveries {
 		delivered, err := s.Store.DeliverToFolder(delivery.mailbox, delivery.message.Folder, delivery.message.Data)
 		if err != nil {
@@ -524,6 +538,34 @@ func (s *Server) deliverProcessed(ctx context.Context, tx transaction, deliverie
 		}
 	}
 	return nil
+}
+
+func (s *Server) warnIfForwardingSenderIsExternal(tx transaction, data []byte) {
+	if len(tx.forward) == 0 || s.LocalDomain == nil || tx.from == "" {
+		return
+	}
+	envelopeDomain, ok := recipientDomain(tx.from)
+	if !ok {
+		return
+	}
+	envelopeIsLocal := s.LocalDomain(envelopeDomain)
+	headerFrom := ""
+	headerIsLocal := true
+	if message, err := mail.ReadMessage(bytes.NewReader(data)); err == nil {
+		if address, err := mail.ParseAddress(message.Header.Get("From")); err == nil {
+			if domain, ok := recipientDomain(address.Address); ok {
+				headerFrom = address.Address
+				headerIsLocal = s.LocalDomain(domain)
+				if envelopeIsLocal && !headerIsLocal {
+					envelopeDomain = domain
+				}
+			}
+		}
+	}
+	if envelopeIsLocal && headerIsLocal {
+		return
+	}
+	s.logger().Warn("SMTP forwarding sender domain is not local", "sender", tx.from, "header_from", headerFrom, "domain", envelopeDomain, "reason", "recipient SPF/DMARC checks will likely fail")
 }
 
 // Relay forwards a message to an external recipient using the configured MX
@@ -591,6 +633,7 @@ func (s *Server) relayMX(ctx context.Context, from, recipient string, data []byt
 	if !ok {
 		return errors.New("invalid forwarding recipient")
 	}
+	messageID := MessageID(data)
 	lookup := s.LookupMX
 	if lookup == nil {
 		lookup = net.DefaultResolver.LookupMX
@@ -612,22 +655,22 @@ func (s *Server) relayMX(ctx context.Context, from, recipient string, data []byt
 		if host == "" {
 			continue
 		}
-		s.logger().Info("SMTP forwarding attempt", "domain", domain, "recipient", recipient, "mx_host", host, "sender", from)
+		s.logger().Info("SMTP forwarding attempt", "domain", domain, "recipient", recipient, "mx_host", host, "sender", from, "message_id", messageID)
 		connection, dialErr := s.dialSMTP(ctx, net.JoinHostPort(host, "25"))
 		if dialErr != nil {
-			s.logger().Warn("SMTP forwarding connection failed", "domain", domain, "recipient", recipient, "mx_host", host, "error", dialErr)
+			s.logger().Warn("SMTP forwarding connection failed", "domain", domain, "recipient", recipient, "mx_host", host, "message_id", messageID, "error", dialErr)
 			lastErr = dialErr
 			continue
 		}
-		err = relaySMTP(connection, s.Hostname, from, recipient, data)
+		response, relayErr := relaySMTP(connection, s.Hostname, from, recipient, data)
 		_ = connection.Close()
-		if err == nil {
-			s.logger().Info("SMTP forwarding completed", "domain", domain, "recipient", recipient, "mx_host", host, "bytes", len(data))
+		if relayErr == nil {
+			s.logger().Info("SMTP forwarding completed", "domain", domain, "recipient", recipient, "mx_host", host, "bytes", len(data), "message_id", messageID, "response", response)
 			return nil
 		}
-		s.logger().Warn("SMTP forwarding attempt failed", "domain", domain, "recipient", recipient, "mx_host", host, "error", err)
-		lastErr = err
-		if response, ok := err.(smtpResponseError); ok && response.Code >= 500 && response.Code < 600 {
+		s.logger().Warn("SMTP forwarding attempt failed", "domain", domain, "recipient", recipient, "mx_host", host, "message_id", messageID, "error", relayErr)
+		lastErr = relayErr
+		if response, ok := relayErr.(smtpResponseError); ok && response.Code >= 500 && response.Code < 600 {
 			break
 		}
 	}
@@ -641,7 +684,11 @@ func (s *Server) dialSMTP(ctx context.Context, address string) (net.Conn, error)
 	if s.DialSMTP != nil {
 		return s.DialSMTP(ctx, address)
 	}
-	return (&net.Dialer{Timeout: 30 * time.Second}).DialContext(ctx, "tcp", address)
+	network := strings.TrimSpace(s.RelayNetwork)
+	if network == "" {
+		network = "tcp"
+	}
+	return (&net.Dialer{Timeout: 30 * time.Second}).DialContext(ctx, network, address)
 }
 
 type smtpResponseError struct {
@@ -651,41 +698,42 @@ type smtpResponseError struct {
 
 func (e smtpResponseError) Error() string { return fmt.Sprintf("SMTP %d %s", e.Code, e.Text) }
 
-func relaySMTP(connection net.Conn, hostname, from, recipient string, data []byte) error {
+func relaySMTP(connection net.Conn, hostname, from, recipient string, data []byte) (string, error) {
 	reader := bufio.NewReaderSize(connection, 16*1024)
 	writer := bufio.NewWriterSize(connection, 16*1024)
 	if _, err := readSMTPResponse(reader, 220); err != nil {
-		return err
+		return "", err
 	}
 	if err := sendSMTPCommand(reader, writer, 250, "EHLO %s", hostname); err != nil {
 		if response, ok := err.(smtpResponseError); !ok || response.Code < 500 || response.Code >= 600 {
-			return err
+			return "", err
 		}
 		if err := sendSMTPCommand(reader, writer, 250, "HELO %s", hostname); err != nil {
-			return err
+			return "", err
 		}
 	}
 	if err := sendSMTPCommand(reader, writer, 250, "MAIL FROM:<%s>", from); err != nil {
-		return err
+		return "", err
 	}
 	if err := sendSMTPCommand(reader, writer, 250, "RCPT TO:<%s>", recipient); err != nil {
-		return err
+		return "", err
 	}
 	if err := sendSMTPCommand(reader, writer, 354, "DATA"); err != nil {
-		return err
+		return "", err
 	}
 	if err := writeSMTPData(writer, data); err != nil {
-		return err
+		return "", err
 	}
 	if err := writer.Flush(); err != nil {
-		return err
+		return "", err
 	}
-	if _, err := readSMTPResponse(reader, 250); err != nil {
-		return err
+	response, err := readSMTPResponse(reader, 250)
+	if err != nil {
+		return "", err
 	}
 	_, _ = fmt.Fprint(writer, "QUIT\r\n")
 	_ = writer.Flush()
-	return nil
+	return "250 " + strings.TrimSpace(response), nil
 }
 
 func sendSMTPCommand(reader *bufio.Reader, writer *bufio.Writer, expected int, format string, args ...any) error {

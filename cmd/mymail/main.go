@@ -215,6 +215,11 @@ func main() {
 		"smtp_listen", cfg.SMTPListen,
 		"smtp_cleartext_listen", cfg.SMTPCleartextListen,
 	)
+	relayNetwork := cfg.SMTPRelayNetwork
+	if relayNetwork == "" {
+		relayNetwork = "tcp"
+	}
+	logger.Info("configuration SMTP relay", "hostname", cfg.Hostname, "relay_network", relayNetwork)
 	if !isRemoteOnly {
 		logger.Info("configuration IMAP listeners",
 			"imap_listen", cfg.IMAPListen,
@@ -434,7 +439,7 @@ func main() {
 
 	newSMTPServer := func(addr string, startTLSConfig *tls.Config, requireSTARTTLS bool) *smtp.Server {
 		srv := &smtp.Server{
-			Addr: addr, StartTLSConfig: startTLSConfig, RequireSTARTTLS: requireSTARTTLS, Hostname: cfg.Hostname, Store: store,
+			Addr: addr, StartTLSConfig: startTLSConfig, RequireSTARTTLS: requireSTARTTLS, Hostname: cfg.Hostname, RelayNetwork: cfg.SMTPRelayNetwork, Store: store,
 			Processors: processors, Resolve: resolve, LocalDomain: localDomain, DKIMSigner: dkimSigner, Authenticate: authenticate, AuthLimiter: authLimiter, Logger: logger,
 		}
 		// Remote role: resolve uses the dynamic mailbox cache from the local side.
@@ -522,6 +527,7 @@ func main() {
 			// fall back to direct MX relay when the remote is not connected.
 			srv.SplitForward = func(ctx context.Context, from, recipient string, data []byte, fallback func(context.Context, string, string, []byte) error) error {
 				if splitClient.IsConnected() {
+					logger.Info("split forwarding to remote", "sender", from, "recipient", recipient, "message_id", smtp.MessageID(data))
 					data = srv.SignDKIM(from, recipient, data)
 					return splitClient.Send(ctx, split.SendRequest{
 						From:      from,

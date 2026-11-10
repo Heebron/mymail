@@ -35,7 +35,12 @@ auth_throttle:
   failure_window: 15m
 # Values may use environment variables, for example: ${HOME}/mymail
 maildir_root: /mnt/probox/@email
+# In split mode, the remote must use its public FQDN, matching the remote IP's
+# reverse DNS; this name is sent in the SMTP EHLO greeting.
 hostname: mail.example.test
+# Network for outbound MX relays: tcp (default), tcp4, or tcp6. Use tcp4 or
+# tcp6 when only that address family has correctly configured reverse DNS.
+# smtp_relay_network: tcp4
 # DKIM signing for outgoing emails. When domain, private_key, public_key, and
 # selector are all configured, MyMail adds a DKIM-Signature header to outgoing
 # messages before forwarding them to destination MX hosts.

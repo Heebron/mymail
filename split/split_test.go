@@ -44,7 +44,9 @@ func TestSplitLinkDeliversInBothDirections(t *testing.T) {
 }
 
 func TestSplitLinkWithoutClientDeliveryHandlerReturnsError(t *testing.T) {
-	server, _ := startTestSplitPair(t, func(context.Context, SendRequest) error { return nil }, nil)
+	var logs bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&logs, nil))
+	server, _ := startTestSplitPair(t, func(context.Context, SendRequest) error { return nil }, nil, logger)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	err := server.Send(ctx, SendRequest{
@@ -55,9 +57,27 @@ func TestSplitLinkWithoutClientDeliveryHandlerReturnsError(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "no delivery handler") {
 		t.Fatalf("server Send() error = %v, want no delivery handler", err)
 	}
+	if got := logs.String(); !strings.Contains(got, `msg="split SendMail sent"`) || !strings.Contains(got, `msg="split SendMail failed"`) || !strings.Contains(got, "stream=1") {
+		t.Fatalf("split SendMail logs missing sent/failure stream details: %s", got)
+	}
 }
 
-func startTestSplitPair(t *testing.T, serverDeliver, clientDeliver func(context.Context, SendRequest) error) (*Server, *Client) {
+func TestSplitSendLogsAcknowledgement(t *testing.T) {
+	var logs bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&logs, nil))
+	_, client := startTestSplitPair(t, func(context.Context, SendRequest) error { return nil }, nil, logger)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	req := SendRequest{From: "sender@example.test", Recipient: "recipient@example.test", Data: []byte("message")}
+	if err := client.Send(ctx, req); err != nil {
+		t.Fatalf("client Send() error = %v", err)
+	}
+	if got := logs.String(); !strings.Contains(got, `msg="split SendMail sent"`) || !strings.Contains(got, `msg="split SendMail acknowledged"`) || !strings.Contains(got, "stream=1") || !strings.Contains(got, "to=recipient@example.test") {
+		t.Fatalf("split SendMail logs missing sent/acknowledged stream details: %s", got)
+	}
+}
+
+func startTestSplitPair(t *testing.T, serverDeliver, clientDeliver func(context.Context, SendRequest) error, loggers ...*slog.Logger) (*Server, *Client) {
 	t.Helper()
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -70,6 +90,9 @@ func startTestSplitPair(t *testing.T, serverDeliver, clientDeliver func(context.
 
 	certificate := testSplitCertificate(t)
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	if len(loggers) > 0 {
+		logger = loggers[0]
+	}
 	ready := make(chan struct{}, 1)
 	server := &Server{
 		Addr:      addr,

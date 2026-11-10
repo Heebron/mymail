@@ -232,17 +232,22 @@ func (l *link) respondPending(streamID uint32, resp response) {
 
 // sendRequest sends a SendMail frame and waits for the Ack/Err response.
 func (l *link) sendRequest(ctx context.Context, req SendRequest) error {
-	if l.closed.Load() == 1 {
-		return errors.New("connection closed")
-	}
+	started := time.Now()
 	streamID := l.nextStreamID.Add(1) - 1
+	fail := func(err error) error {
+		l.log.Warn("split SendMail failed", "stream", streamID, "from", req.From, "to", req.Recipient, "error", err, "duration", time.Since(started))
+		return err
+	}
+	if l.closed.Load() == 1 {
+		return fail(errors.New("connection closed"))
+	}
 	ch := make(chan response, 1)
 	l.pendingMu.Lock()
 	if l.pending != nil {
 		l.pending[streamID] = ch
 	} else {
 		l.pendingMu.Unlock()
-		return errors.New("connection closed")
+		return fail(errors.New("connection closed"))
 	}
 	l.pendingMu.Unlock()
 
@@ -252,21 +257,23 @@ func (l *link) sendRequest(ctx context.Context, req SendRequest) error {
 	l.writeMu.Unlock()
 	if err != nil {
 		l.removePending(streamID)
-		return fmt.Errorf("write SendMail: %w", err)
+		return fail(fmt.Errorf("write SendMail: %w", err))
 	}
+	l.log.Info("split SendMail sent", "stream", streamID, "from", req.From, "to", req.Recipient, "bytes", len(req.Data))
 
 	select {
 	case resp, ok := <-ch:
 		if !ok {
-			return errors.New("connection closed")
+			return fail(errors.New("connection closed"))
 		}
 		if resp.ok {
+			l.log.Info("split SendMail acknowledged", "stream", streamID, "to", req.Recipient, "duration", time.Since(started))
 			return nil
 		}
-		return errors.New(resp.err)
+		return fail(errors.New(resp.err))
 	case <-ctx.Done():
 		l.removePending(streamID)
-		return ctx.Err()
+		return fail(ctx.Err())
 	}
 }
 

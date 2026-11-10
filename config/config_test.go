@@ -105,6 +105,7 @@ func TestValidateDKIMOnlyOnSplitLocalSide(t *testing.T) {
 	remote := Defaults()
 	remote.SplitMode = "on"
 	remote.SplitListen = "127.0.0.1:1783"
+	remote.Hostname = "smtp.example.test"
 	remote.TLSCertFile = "tls.crt"
 	remote.TLSKeyFile = "tls.key"
 	remote.DKIM.Domain = "example.test"
@@ -118,6 +119,7 @@ func TestValidateDKIMOnlyOnSplitLocalSide(t *testing.T) {
 	combined.SplitMode = "on"
 	combined.SplitListen = "127.0.0.1:1783"
 	combined.SplitConnect = "127.0.0.1:1784"
+	combined.Hostname = "smtp.example.test"
 	combined.TLSCertFile = "tls.crt"
 	combined.TLSKeyFile = "tls.key"
 	combined.MaildirRoot = t.TempDir()
@@ -130,6 +132,78 @@ func TestValidateDKIMOnlyOnSplitLocalSide(t *testing.T) {
 	}
 	if err := combined.Validate(); err != nil {
 		t.Fatalf("combined local,remote Validate() error = %v", err)
+	}
+}
+
+func TestValidateRemoteHostname(t *testing.T) {
+	newRemoteConfig := func(hostname string) Config {
+		cfg := Defaults()
+		cfg.SplitMode = "on"
+		cfg.SplitListen = "127.0.0.1:1783"
+		cfg.TLSCertFile = "tls.crt"
+		cfg.TLSKeyFile = "tls.key"
+		cfg.Hostname = hostname
+		return cfg
+	}
+
+	for _, hostname := range []string{"localhost", "LOCALHOST", "mail.localhost", "localhost.localdomain", "127.0.0.1", "::1", "mailhost"} {
+		t.Run("reject_"+hostname, func(t *testing.T) {
+			cfg := newRemoteConfig(hostname)
+			err := cfg.Validate()
+			if err == nil || !strings.Contains(err.Error(), "hostname must be the remote's public fully qualified domain name") {
+				t.Fatalf("Validate() error = %v, want remote hostname validation error", err)
+			}
+		})
+	}
+
+	for _, hostname := range []string{"smtp.example.test", "smtp.example.test."} {
+		t.Run("accept_"+hostname, func(t *testing.T) {
+			cfg := newRemoteConfig(hostname)
+			if err := cfg.Validate(); err != nil {
+				t.Fatalf("Validate() error = %v, want valid remote hostname", err)
+			}
+		})
+	}
+
+	local := Defaults()
+	local.Users = map[string]User{"alice@example.test": {Password: "secret"}}
+	if err := local.Validate(); err != nil {
+		t.Fatalf("non-split Validate() with default localhost hostname error = %v", err)
+	}
+}
+
+func TestValidateSMTPRelayNetwork(t *testing.T) {
+	for _, tt := range []struct {
+		value string
+		want  string
+	}{
+		{value: "", want: ""},
+		{value: "tcp", want: "tcp"},
+		{value: "tcp4", want: "tcp4"},
+		{value: "TCP6", want: "tcp6"},
+		{value: " TCP4 ", want: "tcp4"},
+	} {
+		t.Run(tt.value, func(t *testing.T) {
+			cfg := Defaults()
+			cfg.Users = map[string]User{"alice@example.test": {Password: "secret"}}
+			cfg.SMTPRelayNetwork = tt.value
+			if err := cfg.Validate(); err != nil {
+				t.Fatalf("Validate() error = %v", err)
+			}
+			if cfg.SMTPRelayNetwork != tt.want {
+				t.Fatalf("SMTPRelayNetwork = %q, want %q", cfg.SMTPRelayNetwork, tt.want)
+			}
+		})
+	}
+
+	for _, value := range []string{"udp", "ipv4"} {
+		t.Run("reject_"+value, func(t *testing.T) {
+			cfg := Defaults()
+			cfg.SMTPRelayNetwork = value
+			if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "smtp_relay_network must be tcp, tcp4, or tcp6") {
+				t.Fatalf("Validate() error = %v, want invalid relay network error", err)
+			}
+		})
 	}
 }
 

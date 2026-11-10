@@ -102,6 +102,40 @@ func TestRelayBypassesSplitForward(t *testing.T) {
 	}
 }
 
+func TestDialSMTPRelayNetwork(t *testing.T) {
+	listener, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	go func() {
+		for {
+			connection, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			_ = connection.Close()
+		}
+	}()
+
+	for _, network := range []string{"tcp4", ""} {
+		server := &Server{RelayNetwork: network}
+		connection, err := server.dialSMTP(context.Background(), listener.Addr().String())
+		if err != nil {
+			t.Errorf("dialSMTP(%q) error = %v, want successful IPv4 connection", network, err)
+			continue
+		}
+		_ = connection.Close()
+	}
+
+	server := &Server{RelayNetwork: "tcp6"}
+	connection, err := server.dialSMTP(context.Background(), listener.Addr().String())
+	if err == nil {
+		_ = connection.Close()
+		t.Fatal("dialSMTP(tcp6) unexpectedly connected to an IPv4 listener")
+	}
+}
+
 func TestSignDKIMReturnsSignedOrOriginalMessage(t *testing.T) {
 	original := []byte("Subject: test\r\n\r\nbody")
 	signed := []byte("DKIM-Signature: test\r\nSubject: test\r\n\r\nbody")
@@ -123,6 +157,7 @@ func TestSignDKIMReturnsSignedOrOriginalMessage(t *testing.T) {
 }
 
 func TestRelayDoesNotSignDKIM(t *testing.T) {
+	var relayLogs bytes.Buffer
 	relayServer, relayClient := net.Pipe()
 	defer relayClient.Close()
 	if err := relayServer.SetDeadline(time.Now().Add(5 * time.Second)); err != nil {
@@ -178,7 +213,7 @@ func TestRelayDoesNotSignDKIM(t *testing.T) {
 			}
 			data.WriteString(line)
 		}
-		if err := writeLine("250 queued"); err != nil {
+		if err := writeLine("250 2.6.0 <queue-id@example.test> Queued mail for delivery"); err != nil {
 			relayErrors <- err
 			return
 		}
@@ -201,9 +236,9 @@ func TestRelayDoesNotSignDKIM(t *testing.T) {
 			signerCalls++
 			return append([]byte("DKIM-Signature: unexpected\r\n"), data...), nil
 		},
-		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Logger: slog.New(slog.NewTextHandler(&relayLogs, nil)),
 	}
-	message := []byte("Subject: relay test\r\n\r\nbody\r\n")
+	message := []byte("Message-ID: <relay-test@example.test>\r\nSubject: relay test\r\n\r\nbody\r\n")
 	if err := server.Relay(context.Background(), "sender@example.test", "recipient@remote.test", message); err != nil {
 		t.Fatalf("Relay() error = %v", err)
 	}
@@ -219,6 +254,58 @@ func TestRelayDoesNotSignDKIM(t *testing.T) {
 	}
 	if !strings.Contains(got, "Subject: relay test") {
 		t.Fatalf("relayed message missing original content: %q", got)
+	}
+	if got := relayLogs.String(); !strings.Contains(got, "message_id=<relay-test@example.test>") || !strings.Contains(got, `response="250 2.6.0 <queue-id@example.test> Queued mail for delivery"`) {
+		t.Fatalf("relay logs missing message ID or final MX response: %s", got)
+	}
+}
+
+func TestForwardingSenderDomainWarning(t *testing.T) {
+	tests := []struct {
+		name        string
+		sender      string
+		message     string
+		wantWarning bool
+		wantHeader  string
+		wantDomain  string
+	}{
+		{name: "local envelope and header", sender: "sender@example.test", message: "From: sender@example.test\r\n\r\nbody", wantWarning: false},
+		{name: "foreign envelope", sender: "sender@comcast.net", message: "From: sender@example.test\r\n\r\nbody", wantWarning: true, wantHeader: "sender@example.test", wantDomain: "comcast.net"},
+		{name: "foreign header", sender: "sender@example.test", message: "From: sender@comcast.net\r\n\r\nbody", wantWarning: true, wantHeader: "sender@comcast.net", wantDomain: "comcast.net"},
+		{name: "invalid header falls back to envelope", sender: "sender@comcast.net", message: "From: not-an-address\r\n\r\nbody", wantWarning: true, wantDomain: "comcast.net"},
+		{name: "null sender", sender: "", message: "From: sender@comcast.net\r\n\r\nbody", wantWarning: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var logs bytes.Buffer
+			server := &Server{
+				LocalDomain: func(domain string) bool { return domain == "example.test" },
+				SplitForward: func(context.Context, string, string, []byte, func(context.Context, string, string, []byte) error) error {
+					return nil
+				},
+				Logger: slog.New(slog.NewTextHandler(&logs, nil)),
+			}
+			err := server.deliverProcessed(context.Background(), transaction{
+				from:    tt.sender,
+				forward: []string{"recipient@remote.test"},
+			}, nil, []byte(tt.message))
+			if err != nil {
+				t.Fatalf("deliverProcessed() error = %v", err)
+			}
+			got := logs.String()
+			warning := strings.Contains(got, "SMTP forwarding sender domain is not local")
+			if warning != tt.wantWarning {
+				t.Fatalf("warning logged = %t, want %t; logs: %s", warning, tt.wantWarning, got)
+			}
+			if tt.wantWarning {
+				if !strings.Contains(got, "domain="+tt.wantDomain) {
+					t.Errorf("warning missing domain %q: %s", tt.wantDomain, got)
+				}
+				if tt.wantHeader != "" && !strings.Contains(got, "header_from="+tt.wantHeader) {
+					t.Errorf("warning missing header From %q: %s", tt.wantHeader, got)
+				}
+			}
+		})
 	}
 }
 

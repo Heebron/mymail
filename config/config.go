@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"strings"
 
@@ -63,6 +64,8 @@ type Config struct {
 	SMTPListen string `yaml:"smtp_listen"`
 	// SMTPCleartextListen is the optional cleartext SMTP listener address.
 	SMTPCleartextListen string `yaml:"smtp_cleartext_listen,omitempty"`
+	// SMTPRelayNetwork selects the network used for outbound MX connections.
+	SMTPRelayNetwork string `yaml:"smtp_relay_network,omitempty"`
 	// SMTPRequireSTARTTLS requires TLS before SMTP authentication or MAIL.
 	SMTPRequireSTARTTLS bool `yaml:"smtp_require_starttls,omitempty"`
 	// IMAPListen is the cleartext IMAP listener address, optionally with
@@ -156,6 +159,7 @@ func Load(path string) (Config, error) {
 func (c *Config) expandEnvironment() {
 	c.SMTPListen = expandEnvironment(c.SMTPListen)
 	c.SMTPCleartextListen = expandEnvironment(c.SMTPCleartextListen)
+	c.SMTPRelayNetwork = expandEnvironment(c.SMTPRelayNetwork)
 	c.IMAPListen = expandEnvironment(c.IMAPListen)
 	c.IMAPTLSListen = expandEnvironment(c.IMAPTLSListen)
 	c.TLSCertFile = expandEnvironment(c.TLSCertFile)
@@ -213,6 +217,12 @@ func (c *Config) HasDKIM() bool {
 
 // Validate checks listener, TLS, authentication, mailbox, and user settings.
 func (c *Config) Validate() error {
+	c.SMTPRelayNetwork = strings.ToLower(strings.TrimSpace(c.SMTPRelayNetwork))
+	switch c.SMTPRelayNetwork {
+	case "", "tcp", "tcp4", "tcp6":
+	default:
+		return errors.New("smtp_relay_network must be tcp, tcp4, or tcp6")
+	}
 	splitEnabled := strings.TrimSpace(c.SplitMode) == "on"
 	if splitEnabled {
 		if err := validateSplitConfig(c); err != nil {
@@ -236,6 +246,11 @@ func (c *Config) Validate() error {
 	}
 	if strings.TrimSpace(c.Hostname) == "" {
 		return errors.New("hostname is required")
+	}
+	if splitEnabled && c.IsSplitRemote() {
+		if err := validateRemoteHostname(c.Hostname); err != nil {
+			return err
+		}
 	}
 	if !splitEnabled || !c.IsSplitRemote() {
 		if strings.TrimSpace(c.MaildirRoot) == "" {
@@ -325,6 +340,15 @@ func (c *Config) Validate() error {
 			}
 			aliases[key] = username
 		}
+	}
+	return nil
+}
+
+func validateRemoteHostname(hostname string) error {
+	name := strings.TrimSuffix(strings.TrimSpace(hostname), ".")
+	lowerName := strings.ToLower(name)
+	if lowerName == "localhost" || lowerName == "localhost.localdomain" || strings.HasSuffix(lowerName, ".localhost") || net.ParseIP(name) != nil || !strings.Contains(name, ".") {
+		return fmt.Errorf("hostname must be the remote's public fully qualified domain name (got %q); it is sent in EHLO and should match the remote IP's reverse DNS", hostname)
 	}
 	return nil
 }
