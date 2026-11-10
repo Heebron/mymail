@@ -307,6 +307,7 @@ func (s *Server) handle(ctx context.Context, conn net.Conn) {
 	logger.Info("SMTP connection started", "remote_addr", remoteAddr, "hostname", s.Hostname)
 	var tx transaction
 	authenticated := false
+
 	for {
 		_ = conn.SetReadDeadline(time.Now().Add(15 * time.Minute))
 		line, err := reader.ReadString('\n')
@@ -342,8 +343,8 @@ func (s *Server) handle(ctx context.Context, conn net.Conn) {
 						return
 					}
 				}
-				auth := !s.RequireSTARTTLS || tlsActive
-				if auth {
+				authReq := !s.RequireSTARTTLS || tlsActive
+				if authReq {
 					if _, err := fmt.Fprint(writer, "250-AUTH PLAIN LOGIN\r\n"); err != nil {
 						return
 					}
