@@ -20,6 +20,7 @@ import (
 func TestLoadYAML(t *testing.T) {
 	t.Setenv("MYMAIL_SPLIT_CERT", "/etc/mymail/split.crt")
 	t.Setenv("MYMAIL_SPLIT_KEY", "/etc/mymail/split.key")
+	t.Setenv("MYMAIL_SPLIT_IP", "192.0.2.23")
 	path := filepath.Join(t.TempDir(), "config.yaml")
 	contents := []byte(`smtp_listen: 127.0.0.1:2525
 smtp_cleartext_listen: 127.0.0.1:25
@@ -31,6 +32,7 @@ tls_cert_file: /etc/mymail/tls.crt
 tls_key_file: /etc/mymail/tls.key
 split_tls_cert_file: ${MYMAIL_SPLIT_CERT}
 split_tls_key_file: ${MYMAIL_SPLIT_KEY}
+split_connect_ip: ${MYMAIL_SPLIT_IP}
 auth_throttle:
   max_attempts_per_connection: 7
   max_failures_per_ip: 23
@@ -74,6 +76,9 @@ users:
 	}
 	if got.SplitTLSCertFile != "/etc/mymail/split.crt" || got.SplitTLSKeyFile != "/etc/mymail/split.key" {
 		t.Fatalf("split TLS certificate files = %q, %q", got.SplitTLSCertFile, got.SplitTLSKeyFile)
+	}
+	if got.SplitConnectIP != "192.0.2.23" {
+		t.Fatalf("split_connect_ip = %q, want environment-expanded address", got.SplitConnectIP)
 	}
 	if got.AuthThrottle.MaxAttemptsPerConnection != 7 || got.AuthThrottle.MaxFailuresPerIP != 23 || got.AuthThrottle.MaxFailuresPerAccount != 11 || got.AuthThrottle.BackoffBase != 2*time.Second || got.AuthThrottle.BackoffMax != 90*time.Second || got.AuthThrottle.ResponseDelayMax != 3*time.Second || got.AuthThrottle.FailureWindow != 20*time.Minute {
 		t.Fatalf("authentication throttling = %#v", got.AuthThrottle)
@@ -139,7 +144,7 @@ func TestSplitExampleConfigsLoad(t *testing.T) {
 	if !local.IsSplitLocal() || local.IsSplitRemote() {
 		t.Fatalf("local split roles = local:%t remote:%t, want local only", local.IsSplitLocal(), local.IsSplitRemote())
 	}
-	if local.SplitConnect == "" || !local.SplitIgnoreServerName || local.SplitTLSCertFile == "" || local.SplitTLSKeyFile == "" {
+	if local.SplitConnect == "" || local.SplitConnectIP == "" || local.SplitIgnoreServerName || local.SplitTLSCertFile == "" || local.SplitTLSKeyFile == "" {
 		t.Fatalf("local split settings are incomplete: %#v", local)
 	}
 	if len(local.Users) == 0 || local.Users["user@example.test"].PasswordHash != string(passwordHash) {
@@ -255,6 +260,52 @@ func TestValidateSplitConfigIgnoreServerNameRequiresConnect(t *testing.T) {
 	cfg.TLSKeyFile = "tls.key"
 	if err := validateSplitConfig(&cfg); err != nil {
 		t.Fatalf("validateSplitConfig() with split_connect error = %v, want success", err)
+	}
+}
+
+func TestValidateSplitConnectIP(t *testing.T) {
+	base := Config{
+		SplitConnect: "remote.example.test:1783",
+		TLSCertFile:  "tls.crt",
+		TLSKeyFile:   "tls.key",
+	}
+
+	cfg := base
+	cfg.SplitConnectIP = "192.0.2.23"
+	if err := validateSplitConfig(&cfg); err != nil {
+		t.Fatalf("validateSplitConfig() with IPv4 override error = %v, want success", err)
+	}
+
+	cfg.SplitConnectIP = "[2001:db8::23]"
+	if err := validateSplitConfig(&cfg); err != nil {
+		t.Fatalf("validateSplitConfig() with bracketed IPv6 override error = %v, want success", err)
+	}
+
+	cfg = base
+	cfg.SplitConnectIP = "192.0.2.23"
+	cfg.SplitConnect = ""
+	if err := validateSplitConfig(&cfg); err == nil || !strings.Contains(err.Error(), "split_connect_ip requires split_connect") {
+		t.Fatalf("validateSplitConfig() without split_connect error = %v, want split_connect requirement", err)
+	}
+
+	cfg = base
+	cfg.SplitConnectIP = "not-an-ip"
+	if err := validateSplitConfig(&cfg); err == nil || !strings.Contains(err.Error(), "split_connect_ip must be a valid IP address") {
+		t.Fatalf("validateSplitConfig() with non-IP override error = %v, want IP validation error", err)
+	}
+
+	cfg = base
+	cfg.SplitConnect = "192.0.2.1:1783"
+	cfg.SplitConnectIP = "192.0.2.23"
+	if err := validateSplitConfig(&cfg); err == nil || !strings.Contains(err.Error(), "split_connect must use a hostname") {
+		t.Fatalf("validateSplitConfig() with IP split_connect host error = %v, want hostname requirement", err)
+	}
+
+	cfg = base
+	cfg.SplitConnect = "remote.example.test"
+	cfg.SplitConnectIP = "192.0.2.23"
+	if err := validateSplitConfig(&cfg); err == nil || !strings.Contains(err.Error(), "split_connect must be a hostname:port") {
+		t.Fatalf("validateSplitConfig() without split_connect port error = %v, want host:port requirement", err)
 	}
 }
 

@@ -118,6 +118,9 @@ type Config struct {
 	// non-local mail). A local-only instance works normally even when the
 	// remote is unreachable, falling back to direct MX relay.
 	SplitConnect string `yaml:"split_connect,omitempty"`
+	// SplitConnectIP overrides DNS resolution for the host in SplitConnect,
+	// while SplitConnect's hostname remains the TLS server name.
+	SplitConnectIP string `yaml:"split_connect_ip,omitempty"`
 	// SplitCACertFile is the CA certificate file used to verify client
 	// certificates accepted by the split listener and the peer's certificate on
 	// the split link.
@@ -199,6 +202,7 @@ func (c *Config) expandEnvironment() {
 	c.SplitMode = expandEnvironment(c.SplitMode)
 	c.SplitListen = expandEnvironment(c.SplitListen)
 	c.SplitConnect = expandEnvironment(c.SplitConnect)
+	c.SplitConnectIP = expandEnvironment(c.SplitConnectIP)
 	c.SplitCACertFile = expandEnvironment(c.SplitCACertFile)
 	c.SplitLocalClientDN = expandEnvironment(c.SplitLocalClientDN)
 	for username, user := range c.Users {
@@ -418,11 +422,34 @@ func (c *Config) SplitCertificateFiles() (certFile, keyFile string) {
 func validateSplitConfig(c *Config) error {
 	listen := strings.TrimSpace(c.SplitListen)
 	connect := strings.TrimSpace(c.SplitConnect)
+	connectIP := strings.TrimSpace(c.SplitConnectIP)
 	if c.SplitInsecureSkipVerify && connect == "" {
 		return errors.New("split_insecure_skip_verify requires split_connect")
 	}
 	if c.SplitIgnoreServerName && connect == "" {
 		return errors.New("split_ignore_server_name requires split_connect")
+	}
+	if connectIP != "" {
+		if connect == "" {
+			return errors.New("split_connect_ip requires split_connect")
+		}
+		host, port, err := net.SplitHostPort(connect)
+		if err != nil || host == "" || port == "" {
+			return errors.New("split_connect must be a hostname:port when split_connect_ip is set")
+		}
+		if net.ParseIP(host) != nil {
+			return errors.New("split_connect must use a hostname, not an IP address, when split_connect_ip is set")
+		}
+		if (strings.HasPrefix(connectIP, "[") || strings.HasSuffix(connectIP, "]")) &&
+			!(strings.HasPrefix(connectIP, "[") && strings.HasSuffix(connectIP, "]")) {
+			return errors.New("split_connect_ip must be a valid IP address")
+		}
+		if strings.HasPrefix(connectIP, "[") {
+			connectIP = strings.TrimSuffix(strings.TrimPrefix(connectIP, "["), "]")
+		}
+		if net.ParseIP(connectIP) == nil {
+			return errors.New("split_connect_ip must be a valid IP address")
+		}
 	}
 	if listen == "" && connect == "" {
 		return errors.New("split_listen or split_connect is required when split_mode is 'on'")

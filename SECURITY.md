@@ -41,11 +41,13 @@ were not present or proposed patches that did not match the implementation.
   not accept AUTH until STARTTLS succeeds.
 - For split deployments, configure `split_ca_cert_file` on every split listener
   and use certificates issued by that CA for split clients. Avoid
-  `split_insecure_skip_verify` except for controlled diagnostics. When the
-  remote certificate name does not match `split_connect`, prefer
-  `split_ignore_server_name`: it still verifies the chain, but accepts any
-  certificate from a trusted CA for that connection. Pair it with a private
-  `split_ca_cert_file` where possible to limit which certificates are trusted.
+  `split_insecure_skip_verify` except for controlled diagnostics. Keep the
+  remote certificate hostname in `split_connect`; if local DNS masking returns
+  the wrong address, set `split_connect_ip` to the intended IP. This overrides
+  only the TCP destination and preserves hostname and CA-chain verification.
+  `split_ignore_server_name` is a weaker alternative: it skips hostname
+  verification while still accepting any certificate from a trusted CA for
+  that connection. Pair it with a private `split_ca_cert_file` where possible.
   A remote-only instance does not store configured user credentials; it learns
   mailbox addresses from the local and forwards SMTP authentication requests
   to the local over the verified split link.

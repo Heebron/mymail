@@ -52,12 +52,12 @@ users:
     mailbox: user
 
 split_mode: "on"
-split_connect: 203.0.113.20:1783 # Replace with the remote instance's address.
-# This skips only the remote certificate name check because split_connect is
-# an IP address; certificate chain, expiry, and server-auth usage are checked.
-# Pair it with the private split_ca_cert_file below so that only certificates
-# from your split CA are accepted.
-split_ignore_server_name: true
+split_connect: remote.example.test:1783 # Use the hostname on the remote split certificate.
+# If local DNS masking resolves that hostname to the wrong address, set this
+# override to the remote's actual IP. TLS still verifies the hostname above.
+split_connect_ip: 203.0.113.20
+# Weaker alternative: skips only hostname verification; prefer split_connect_ip.
+# split_ignore_server_name: true
 
 # Dedicated client certificate sent to the remote. It must be signed by the
 # remote's split_ca_cert_file and permit TLS client authentication.

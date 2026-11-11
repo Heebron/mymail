@@ -275,9 +275,12 @@ and cannot authenticate local users until it reconnects.
 See the [`config-split-local.yaml`](config-split-local.yaml) and
 [`config-split-remote.yaml`](config-split-remote.yaml) files for documented
 role-specific examples.
-On the local side, `split_ignore_server_name: true` skips only the remote
-certificate's hostname check while retaining CA-chain verification; use it
-when connecting by IP, and preferably pair it with a private `split_ca_cert_file`.
+On the local side, keep the remote certificate hostname in `split_connect`.
+When local DNS masking resolves it to the wrong address, set `split_connect_ip`
+to the remote's IP: the TCP connection uses that address while TLS still
+verifies the hostname from `split_connect`. `split_ignore_server_name: true` is
+a weaker alternative because it skips hostname verification while retaining
+CA-chain verification; if used, pair it with a private `split_ca_cert_file`.
 A remote-only instance does not need `tls_cert_file` or `tls_key_file`: each
 time the local connects, it reads its own `tls_cert_file` and `tls_key_file` and
 sends them over the verified split link, and the remote serves that certificate

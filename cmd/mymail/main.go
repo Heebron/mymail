@@ -324,6 +324,7 @@ func main() {
 				"mode", splitModeLabel,
 				"listen", cfg.SplitListen,
 				"connect", cfg.SplitConnect,
+				"connect_ip", cfg.SplitConnectIP,
 				"tls_cert_file", splitTLSCertFile,
 				"insecure_skip_verify", cfg.SplitInsecureSkipVerify,
 				"ignore_server_name", cfg.SplitIgnoreServerName,
@@ -338,6 +339,7 @@ func main() {
 			logger.Info("configuration split mode",
 				"mode", splitModeLabel,
 				"connect", cfg.SplitConnect,
+				"connect_ip", cfg.SplitConnectIP,
 				"tls_cert_file", splitTLSCertFile,
 				"insecure_skip_verify", cfg.SplitInsecureSkipVerify,
 				"ignore_server_name", cfg.SplitIgnoreServerName,
@@ -475,6 +477,7 @@ func main() {
 		}
 		splitClient = &split.Client{
 			Addr:             cfg.SplitConnect,
+			ConnectIP:        cfg.SplitConnectIP,
 			TLSConfig:        clientTLSConfig,
 			IgnoreServerName: cfg.SplitIgnoreServerName,
 			Logger:           logger,

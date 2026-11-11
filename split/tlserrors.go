@@ -50,7 +50,7 @@ func explainServerCertificateError(err error, cert *x509.Certificate) string {
 	var hostnameErr x509.HostnameError
 	if errors.As(err, &hostnameErr) {
 		cert = hostnameErr.Certificate
-		return fmt.Sprintf("the server certificate is not valid for split_connect host %q; its DNS names are %v; set split_ignore_server_name: true on the local side to skip only the name check%s",
+		return fmt.Sprintf("the server certificate is not valid for split_connect host %q; its DNS names are %v; set split_connect to a certificate hostname and split_connect_ip to its address to retain hostname verification, or set split_ignore_server_name: true to skip only the name check%s",
 			hostnameErr.Host, cert.DNSNames, certificateDescriptionSuffix(cert))
 	}
 

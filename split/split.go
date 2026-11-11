@@ -52,6 +52,7 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -805,7 +806,10 @@ const reconnectInterval = 10 * time.Second
 // automatic reconnection and multiplexed I/O so multiple requests can be in
 // flight simultaneously.
 type Client struct {
-	Addr             string
+	Addr string
+	// ConnectIP overrides DNS for Addr's hostname while retaining it as the TLS
+	// server name.
+	ConnectIP        string
 	TLSConfig        *tls.Config
 	IgnoreServerName bool
 	Logger           *slog.Logger
@@ -919,7 +923,7 @@ func (c *Client) Start(ctx context.Context) {
 			c.connMu.Unlock()
 
 			if !hasConn {
-				c.Logger.Info("split client connecting", "address", c.Addr)
+				c.Logger.Info("split client connecting", "address", c.Addr, "connect_ip", c.ConnectIP)
 				conn, ln, err := c.dialAndHandshake(ctx)
 				if err != nil {
 					if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
@@ -932,7 +936,7 @@ func (c *Client) Start(ctx context.Context) {
 					c.conn = conn
 					c.clientLn = ln
 					c.connMu.Unlock()
-					c.Logger.Info("split client connected", "address", c.Addr)
+					c.Logger.Info("split client connected", "address", c.Addr, "connect_ip", c.ConnectIP)
 					if c.OnConnected != nil {
 						c.OnConnected()
 					}
@@ -976,6 +980,32 @@ func (c *Client) Wait() {
 func (c *Client) dialAndHandshake(ctx context.Context) (net.Conn, *link, error) {
 	dialer := &net.Dialer{Timeout: 10 * time.Second}
 	tlsConfig := c.TLSConfig
+	dialAddress := c.Addr
+	if c.ConnectIP != "" {
+		host, port, err := net.SplitHostPort(c.Addr)
+		if err != nil || host == "" || port == "" {
+			return nil, nil, errors.New("split_connect must be a hostname:port when split_connect_ip is set")
+		}
+		if net.ParseIP(host) != nil {
+			return nil, nil, errors.New("split_connect must use a hostname, not an IP address, when split_connect_ip is set")
+		}
+		connectIP := strings.TrimSpace(c.ConnectIP)
+		if strings.HasPrefix(connectIP, "[") && strings.HasSuffix(connectIP, "]") {
+			connectIP = connectIP[1 : len(connectIP)-1]
+		}
+		if net.ParseIP(connectIP) == nil {
+			return nil, nil, errors.New("split_connect_ip must be a valid IP address")
+		}
+		dialAddress = net.JoinHostPort(connectIP, port)
+		if tlsConfig == nil {
+			tlsConfig = &tls.Config{}
+		} else {
+			tlsConfig = tlsConfig.Clone()
+		}
+		if tlsConfig.ServerName == "" {
+			tlsConfig.ServerName = host
+		}
+	}
 	if c.IgnoreServerName && (tlsConfig == nil || !tlsConfig.InsecureSkipVerify) {
 		tlsConfig = verifyChainIgnoringServerName(tlsConfig)
 	}
@@ -983,9 +1013,9 @@ func (c *Client) dialAndHandshake(ctx context.Context) (net.Conn, *link, error) 
 		Config:    tlsConfig,
 		NetDialer: dialer,
 	}
-	conn, err := tlsDialer.DialContext(ctx, "tcp", c.Addr)
+	conn, err := tlsDialer.DialContext(ctx, "tcp", dialAddress)
 	if err != nil {
-		return nil, nil, fmt.Errorf("dial split %s: %w; TLS diagnosis: %s", c.Addr, err, explainTLSError(err, "client"))
+		return nil, nil, fmt.Errorf("dial split %s (connect_ip %q): %w; TLS diagnosis: %s", c.Addr, c.ConnectIP, err, explainTLSError(err, "client"))
 	}
 	writer := bufio.NewWriter(conn)
 	reader := bufio.NewReader(conn)

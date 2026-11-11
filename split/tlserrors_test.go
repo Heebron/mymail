@@ -106,6 +106,62 @@ func TestSplitTLSClientExplainsHostnameMismatch(t *testing.T) {
 	}
 }
 
+func TestSplitTLSClientConnectIPRetainsSplitConnectHostname(t *testing.T) {
+	ca := newSplitTestCA(t, "server-ca")
+	serverCertificate := issueSplitTestCertificate(t, ca, "split-server", []string{"split.example.test"}, x509.ExtKeyUsageServerAuth)
+	server := startTLSTestServer(t,
+		&tls.Config{Certificates: []tls.Certificate{serverCertificate}, MinVersion: tls.VersionTLS12},
+		slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)), "")
+	_, port, err := net.SplitHostPort(server.addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	client := &Client{
+		Addr:      net.JoinHostPort("split.example.test", port),
+		ConnectIP: "127.0.0.1",
+		TLSConfig: &tls.Config{
+			RootCAs:    ca.pool,
+			MinVersion: tls.VersionTLS12,
+		},
+		Logger: slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)),
+	}
+	conn, _, err := client.dialAndHandshake(context.Background())
+	if err != nil {
+		t.Fatalf("dialAndHandshake() with DNS override failed: %v", err)
+	}
+	defer conn.Close()
+}
+
+func TestSplitTLSClientConnectIPStillRejectsWrongHostname(t *testing.T) {
+	ca := newSplitTestCA(t, "server-ca")
+	serverCertificate := issueSplitTestCertificate(t, ca, "split-server", []string{"split.example.test"}, x509.ExtKeyUsageServerAuth)
+	server := startTLSTestServer(t,
+		&tls.Config{Certificates: []tls.Certificate{serverCertificate}, MinVersion: tls.VersionTLS12},
+		slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)), "")
+	_, port, err := net.SplitHostPort(server.addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	client := &Client{
+		Addr:      net.JoinHostPort("wrong.example.test", port),
+		ConnectIP: "127.0.0.1",
+		TLSConfig: &tls.Config{
+			RootCAs:    ca.pool,
+			MinVersion: tls.VersionTLS12,
+		},
+		Logger: slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)),
+	}
+	_, _, err = client.dialAndHandshake(context.Background())
+	if err == nil {
+		t.Fatal("dialAndHandshake() succeeded with a mismatched split_connect hostname")
+	}
+	if !strings.Contains(err.Error(), `split_connect host "wrong.example.test"`) {
+		t.Fatalf("client TLS error does not identify split_connect hostname: %v", err)
+	}
+}
+
 func TestSplitTLSClientCanIgnoreServerName(t *testing.T) {
 	ca := newSplitTestCA(t, "server-ca")
 	serverCertificate := issueSplitTestCertificate(t, ca, "split-server", []string{"split.example.test"}, x509.ExtKeyUsageServerAuth)
