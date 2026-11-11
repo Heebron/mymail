@@ -297,6 +297,11 @@ an error showing `local_version` and `remote_version`, and the remote closes the
 connection. The local retries every 10 seconds, so the link comes back once both
 sides run the same build. Builds that predate the version exchange are reported
 as an unknown version, so upgrade both instances together.
+Split-link `SendMail`, `SubmitMail`, and mailbox-list frames are independently
+DEFLATE-compressed when the payload is at least 1 KiB and compression reduces
+its size. Authentication, certificate, and control frames are never compressed,
+and each frame uses a fresh compression context to avoid mixing data across
+messages.
 ### `mymail-password`
 
 `mymail-password` reads a password from standard input and prints a bcrypt hash

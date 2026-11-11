@@ -11,6 +11,8 @@
 // Wire protocol (all multi-byte integers are big-endian):
 //
 //	Frame: [1 byte type][4 byte length][payload...]
+//	FlagCompressed (0x80) on a frame type marks a per-frame DEFLATE payload.
+//	Only SendMail, SubmitMail, and MailboxList frames may use this flag.
 //
 // Frame types:
 //
@@ -166,8 +168,18 @@ func (l *link) readLoop() {
 	defer close(l.done)
 	for {
 		frameType, frameData, err := readFrame(l.reader)
+		wireBytes := len(frameData) + 5
+		decodeFailed := false
+		if err == nil {
+			frameType, frameData, err = decodeFramePayload(frameType, frameData, maxDecompressedFrameBytes)
+			if err != nil {
+				decodeFailed = true
+				l.log.Warn("split frame decompression failed; closing connection", "wire_bytes", wireBytes, "error", err)
+				_ = l.c.Close()
+			}
+		}
 		if err != nil {
-			if !errors.Is(err, io.EOF) {
+			if !decodeFailed && !errors.Is(err, io.EOF) {
 				l.log.Debug("split read error", "error", err)
 			}
 			// Clean up all pending waiters so Send calls unblock.
@@ -188,7 +200,7 @@ func (l *link) readLoop() {
 				go l.writeErr(streamID, "malformed SendMail")
 				continue
 			}
-			l.log.Info("split SendMail received", "stream", streamID, "from", req.From, "to", req.Recipient, "bytes", len(req.Data))
+			l.log.Info("split SendMail received", "stream", streamID, "from", req.From, "to", req.Recipient, "bytes", len(req.Data), "wire_bytes", wireBytes)
 			go l.handleSendMail(streamID, req)
 		case TypeSubmitMail:
 			streamID, req, err := parseSendRequestWithStreamID(frameData)
@@ -197,7 +209,7 @@ func (l *link) readLoop() {
 				go l.writeErr(streamID, "malformed SubmitMail")
 				continue
 			}
-			l.log.Info("split SubmitMail received", "stream", streamID, "from", req.From, "to", req.Recipient, "bytes", len(req.Data))
+			l.log.Info("split SubmitMail received", "stream", streamID, "from", req.From, "to", req.Recipient, "bytes", len(req.Data), "wire_bytes", wireBytes)
 			go l.handleSubmitMail(streamID, req)
 		case TypeAuth:
 			streamID, username, password, err := parseAuthRequestWithStreamID(frameData)
@@ -367,8 +379,8 @@ func (l *link) sendMailRequest(ctx context.Context, frameType byte, name string,
 	var err error
 	streamID, err = l.request(ctx, frameType, name, func(id uint32) []byte {
 		return marshalSendRequestWithStreamID(id, req)
-	}, func(id uint32) {
-		l.log.Info("split "+name+" sent", "stream", id, "from", req.From, "to", req.Recipient, "bytes", len(req.Data))
+	}, func(id uint32, wireBytes int) {
+		l.log.Info("split "+name+" sent", "stream", id, "from", req.From, "to", req.Recipient, "bytes", len(req.Data), "wire_bytes", wireBytes)
 	})
 	if err != nil {
 		return fail(err)
@@ -390,7 +402,7 @@ func (l *link) authenticateRequest(ctx context.Context, username, password strin
 	return true, nil
 }
 
-func (l *link) request(ctx context.Context, frameType byte, name string, payload func(uint32) []byte, onSent func(uint32)) (uint32, error) {
+func (l *link) request(ctx context.Context, frameType byte, name string, payload func(uint32) []byte, onSent func(uint32, int)) (uint32, error) {
 	streamID := l.nextStreamID.Add(1) - 1
 	if l.closed.Load() == 1 {
 		return streamID, errors.New("connection closed")
@@ -404,15 +416,14 @@ func (l *link) request(ctx context.Context, frameType byte, name string, payload
 	l.pending[streamID] = ch
 	l.pendingMu.Unlock()
 
-	l.writeMu.Lock()
-	err := writeFrame(l.writer, frameType, payload(streamID))
-	l.writeMu.Unlock()
+	data := payload(streamID)
+	wireBytes, err := l.writePayloadFrame(frameType, data)
 	if err != nil {
 		l.removePending(streamID)
 		return streamID, fmt.Errorf("write %s: %w", name, err)
 	}
 	if onSent != nil {
-		onSent(streamID)
+		onSent(streamID, wireBytes)
 	}
 
 	select {
@@ -430,6 +441,20 @@ func (l *link) request(ctx context.Context, frameType byte, name string, payload
 	}
 }
 
+func (l *link) writePayloadFrame(frameType byte, payload []byte) (int, error) {
+	wireType, wirePayload, err := encodeFramePayload(frameType, payload)
+	if err != nil {
+		return 0, err
+	}
+	l.writeMu.Lock()
+	err = writeFrame(l.writer, wireType, wirePayload)
+	l.writeMu.Unlock()
+	if err != nil {
+		return 0, err
+	}
+	return len(wirePayload) + 5, nil
+}
+
 func (l *link) removePending(streamID uint32) {
 	l.pendingMu.Lock()
 	delete(l.pending, streamID)
@@ -437,9 +462,9 @@ func (l *link) removePending(streamID uint32) {
 }
 
 // sendMailboxList sends the mailbox list frame and waits for the response.
-func (l *link) sendMailboxList(ctx context.Context, addresses []string) error {
+func (l *link) sendMailboxList(ctx context.Context, addresses []string) (int, error) {
 	if l.closed.Load() == 1 {
-		return errors.New("connection closed")
+		return 0, errors.New("connection closed")
 	}
 	streamID := l.nextStreamID.Add(1) - 1
 	ch := make(chan response, 1)
@@ -448,7 +473,7 @@ func (l *link) sendMailboxList(ctx context.Context, addresses []string) error {
 		l.pending[streamID] = ch
 	} else {
 		l.pendingMu.Unlock()
-		return errors.New("connection closed")
+		return 0, errors.New("connection closed")
 	}
 	l.pendingMu.Unlock()
 
@@ -456,26 +481,24 @@ func (l *link) sendMailboxList(ctx context.Context, addresses []string) error {
 	binary.Write(&buf, binary.BigEndian, streamID)
 	buf.Write(marshalMailboxList(addresses))
 
-	l.writeMu.Lock()
-	err := writeFrame(l.writer, TypeMailboxList, buf.Bytes())
-	l.writeMu.Unlock()
+	wireBytes, err := l.writePayloadFrame(TypeMailboxList, buf.Bytes())
 	if err != nil {
 		l.removePending(streamID)
-		return fmt.Errorf("write MailboxList: %w", err)
+		return 0, fmt.Errorf("write MailboxList: %w", err)
 	}
 
 	select {
 	case resp, ok := <-ch:
 		if !ok {
-			return errors.New("connection closed")
+			return 0, errors.New("connection closed")
 		}
 		if resp.ok {
-			return nil
+			return wireBytes, nil
 		}
-		return errors.New(resp.err)
+		return 0, errors.New(resp.err)
 	case <-ctx.Done():
 		l.removePending(streamID)
-		return ctx.Err()
+		return 0, ctx.Err()
 	}
 }
 
@@ -881,9 +904,9 @@ func (c *Client) SendMailboxList(addresses []string) error {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	err := ln.sendMailboxList(ctx, addresses)
+	wireBytes, err := ln.sendMailboxList(ctx, addresses)
 	if err == nil {
-		c.Logger.Info("split mailbox list sent", "count", len(addresses))
+		c.Logger.Info("split mailbox list sent", "count", len(addresses), "wire_bytes", wireBytes)
 	}
 	return err
 }

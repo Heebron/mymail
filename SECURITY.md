@@ -63,7 +63,12 @@ were not present or proposed patches that did not match the implementation.
   only. The remote checks that the received key matches the certificate and
   that the certificate is currently valid, and warns when it does not cover
   `hostname`. Anyone who controls the remote host can read that key, but such
-  a host already handles the mail traffic in plaintext.
+  a host already handles the mail traffic in plaintext. Split-link mail and
+  mailbox-list frames are independently DEFLATE-compressed when that reduces
+  their size; authentication, certificate, and control frames are excluded.
+  Each frame has a fresh compression context, so attacker-controlled message
+  data is not compressed in the same context as secrets. Decompression is
+  capped at 64 MiB per frame.
 - Configure `imap_require_starttls: true` when IMAP authentication must require
   encryption; IMAP's cleartext listener otherwise permits plaintext login.
 - Restrict `health_listen` to trusted networks or a local interface if the
