@@ -1,0 +1,47 @@
+# Remote split instance: deploy on a public host with SMTP ingress and suitable
+# reverse DNS. It handles external SMTP and relays; configured users, mailbox
+# storage, and DKIM signing remain on the local instance. This remote-only role
+# must never have a `users:` section (validation rejects one).
+#
+# While connected, the local publishes its mailbox addresses and aliases so
+# the remote can route inbound mail, and checks SMTP authentication requests
+# received by the remote. If the local disconnects, the remote clears that
+# address list and cannot authenticate users until the local reconnects.
+#
+# The remote also needs no public SMTP certificate: after connecting, the local
+# sends its tls_cert_file/tls_key_file pair over the verified split link, and
+# the remote serves it on ports 25, 465, and 587. The pair is held in memory
+# only. Until it arrives (for example right after the remote restarts), port
+# 465 handshakes fail and STARTTLS is not offered on 25 or 587.
+
+# This value should be the public FQDN matching the host's reverse DNS.
+hostname: smtp.remote.example.test
+# Choose tcp4 or tcp6 if only that address family has correct reverse DNS.
+smtp_relay_network: tcp4
+
+smtp_listen: 0.0.0.0:587
+smtp_cleartext_listen: 0.0.0.0:25
+smtp_tls_listen: 0.0.0.0:465
+
+# Optional: a locally stored public certificate used until the local sends one.
+# tls_cert_file: /etc/letsencrypt/live/smtp.remote.example.test/fullchain.pem
+# tls_key_file: /etc/letsencrypt/live/smtp.remote.example.test/privkey.pem
+
+# Use :8080 when running in Kubernetes so the kubelet probes can reach it.
+health_listen: 127.0.0.1:8080
+
+split_mode: "on"
+split_listen: 0.0.0.0:1783
+# Required: this CA verifies the local instance's split client certificate.
+split_ca_cert_file: /etc/mymail/split-ca.crt
+
+# The split listener needs its own certificate before the local can connect.
+# Issue it from your private split CA with the serverAuth extended key usage
+# and set split_ca_cert_file to that CA in the local config. Without this pair,
+# the split listener falls back to tls_cert_file/tls_key_file.
+split_tls_cert_file: /etc/mymail/split-server.crt
+split_tls_key_file: /etc/mymail/split-server.key
+
+# Optionally restrict which client certificate issued by the CA may connect.
+# Obtain the value with: openssl x509 -in split-client.crt -noout -subject -nameopt RFC2253
+# split_local_client_dn: CN=local-mail,O=Example

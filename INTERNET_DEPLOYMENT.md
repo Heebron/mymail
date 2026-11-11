@@ -56,7 +56,7 @@ omitted `mailbox` defaults to that full address:
 ```yaml
 users:
   alice@example.com:
-    password_sha256: <LOWERCASE_SHA256_HEX>
+    password_hash: ${MYMAIL_ALICE_PASSWORD_HASH}
     # mailbox: alice@example.com  # optional; this is the default
 ```
 
@@ -81,7 +81,8 @@ The standard configuration provides:
 
 - SMTP submission on `:587`, always requiring `STARTTLS`.
 - Optional implicit-TLS SMTP submission on `:465`.
-- An optional cleartext SMTP listener on `:25`.
+- An optional inbound SMTP listener on `:25`; it offers `STARTTLS` and gates
+  `AUTH` on TLS, but accepts ordinary inbound mail without TLS.
 - IMAP with `STARTTLS` on `:1143`.
 - An optional implicit-TLS IMAP listener, normally `:993`.
 
@@ -104,31 +105,19 @@ publicly. If it must be reachable through a proxy, use a TLS-capable proxy or
 a TCP pass-through that preserves the `STARTTLS` connection.
 
 MyMail creates a STARTTLS SMTP submission listener, an optional implicit-TLS
-SMTP submission listener, and, separately, an optional cleartext SMTP listener.
-The normal deployment is to keep the cleartext listener on port `25` for
-server-to-server inbound SMTP, require `STARTTLS` on port `587`, and optionally
-offer implicit TLS on port `465` for authenticated users. The port `25` listener does
-not advertise `STARTTLS`; SMTP transport encryption for inbound mail therefore
-requires a separate fronting MTA or proxy if it is a requirement.
-
-If port `25` must instead be handled by MyMail's TLS-capable listener, choose
-one of these designs:
-
-1. Put a TCP proxy or firewall port-forward in front of the TLS-capable
-   listener, forwarding public `25` to the internal listener. This allows the
-   same endpoint to serve inbound SMTP and authenticated submission.
-2. Configure the TLS-capable `smtp_listen` directly on `:25` and provide
-   public `:587` through a TCP proxy.
-3. Keep `:25` cleartext for ordinary inbound SMTP and use `:587` for all
-   authenticated client submission. This is the simplest supported split, but
-   inbound transport encryption is opportunistic only when a separate MTA or
-   proxy provides it.
+SMTP submission listener, and an optional inbound SMTP listener on `:25`. The
+normal deployment is to keep `:25` for server-to-server mail, require `STARTTLS`
+on `:587`, and optionally offer implicit TLS on `:465` for authenticated users.
+The port `25` listener advertises `STARTTLS` when TLS is configured, suppresses
+`AUTH` until TLS is active, and accepts `MAIL` without TLS so that ordinary MX
+delivery continues to work. Inbound transport encryption is opportunistic:
+peers that do not negotiate `STARTTLS` can still send mail, but cannot use AUTH.
 
 The `smtp_listen` submission listener always requires `STARTTLS` before
 authentication or `MAIL`, which is appropriate for `587`. If the TLS-capable
-listener is instead used for direct Internet-to-MX mail on `25`, verify that
-the mandatory TLS policy is compatible with the sending providers you need to
-accept; SMTP peers may not all support mandatory TLS.
+submission listener is used for direct Internet-to-MX traffic, its mandatory
+TLS policy may be incompatible with sending providers that do not support
+`STARTTLS`; use `smtp_cleartext_listen` for normal inbound MX traffic.
 
 The systemd unit supplied by the project binds as `mymail`, so direct binding
 to privileged port `25` may require a firewall redirect, socket activation,
@@ -189,7 +178,9 @@ MyMail currently delivers external recipients directly to their domain's MX
 hosts on TCP port `25`. The direct path:
 
 - Tries MX hosts in preference order.
-- Does not negotiate outbound `STARTTLS`.
+- Negotiates opportunistic outbound `STARTTLS` when advertised. Certificate
+  verification results are logged but do not prevent delivery; a failed TLS
+  handshake causes one reconnect to the same MX in plaintext.
 - Does not provide a durable outbound queue or retry store.
 - Adds DKIM signatures when DKIM is configured.
 
@@ -226,9 +217,11 @@ systemctl status mymail
 journalctl -u mymail -e
 ```
 
-Use `password_sha256` rather than plaintext `password` values in the deployed
-configuration, restrict the file to the service account, and use the project's
-`mymail-password` command to generate hashes. The configurable `auth_throttle`
+Use bcrypt `password_hash` values rather than plaintext `password` or legacy
+`password_sha256` values in the deployed configuration. Generate a hash with the
+project's `mymail-password` command, pass the password on standard input, and
+provide the resulting hash through a protected environment variable. The
+configurable `auth_throttle`
 limits shared by SMTP and IMAP authentication help limit guessing, but they do
 not replace firewall rate limits, monitoring, backups, spam filtering, malware
 scanning, or regular operating-system updates. Failed-authentication responses

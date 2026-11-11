@@ -1,6 +1,7 @@
 package split
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"crypto/rand"
@@ -8,6 +9,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/binary"
 	"encoding/pem"
 	"errors"
 	"io"
@@ -42,6 +44,121 @@ func TestSplitLinkDeliversInBothDirections(t *testing.T) {
 		t.Fatalf("server Send() error = %v", err)
 	}
 	assertSendRequest(t, receiveSendRequest(t, remoteDeliveries), req)
+}
+
+func TestSplitServerSendsSingleHandshakeFrame(t *testing.T) {
+	var logs bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&logs, nil))
+	_, client := startTestSplitPair(t, func(context.Context, SendRequest) error { return nil }, nil, logger)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	// The server writes any extra handshake frame before it can acknowledge a
+	// request, so a completed round trip guarantees the client has read it.
+	if err := client.Send(ctx, SendRequest{From: "sender@example.test", Recipient: "recipient@example.test", Data: []byte("message")}); err != nil {
+		t.Fatalf("client Send() error = %v", err)
+	}
+	if got := logs.String(); strings.Contains(got, "split unknown frame type") {
+		t.Fatalf("split link logged an unknown frame after the handshake: %s", got)
+	}
+}
+
+func TestSplitLinkIgnoresDuplicateHandshakeFrame(t *testing.T) {
+	var logs bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&logs, nil))
+	local, peer := net.Pipe()
+	defer local.Close()
+	ln := newLink(local, logger, bufio.NewReader(local), bufio.NewWriter(local), nil, nil, nil, nil, nil)
+	ln.start()
+
+	peerWriter := bufio.NewWriter(peer)
+	handshakeData := make([]byte, 4)
+	binary.BigEndian.PutUint32(handshakeData, ProtocolMagic)
+	if err := writeFrame(peerWriter, TypeHandshake, handshakeData); err != nil {
+		t.Fatalf("write duplicate handshake: %v", err)
+	}
+	if err := writeFrame(peerWriter, 0x7f, nil); err != nil {
+		t.Fatalf("write unknown frame: %v", err)
+	}
+	peer.Close()
+	select {
+	case <-ln.done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("split link read loop did not stop")
+	}
+
+	got := logs.String()
+	if strings.Contains(got, "type=0x00") {
+		t.Fatalf("duplicate handshake frame logged as unknown: %s", got)
+	}
+	if !strings.Contains(got, "split unknown frame type") || !strings.Contains(got, "type=0x7f") {
+		t.Fatalf("unknown frame after duplicate handshake was not reported: %s", got)
+	}
+}
+
+func TestSplitClientSendsTLSCertificate(t *testing.T) {
+	type receivedCertificate struct{ cert, key []byte }
+	received := make(chan receivedCertificate, 1)
+	_, client := startConfiguredTestSplitPair(t, func(context.Context, SendRequest) error { return nil }, nil, nil, nil, func(server *Server) {
+		server.OnTLSCertificate = func(certPEM, keyPEM []byte) error {
+			received <- receivedCertificate{cert: certPEM, key: keyPEM}
+			return nil
+		}
+	})
+
+	certPEM := []byte("-----BEGIN CERTIFICATE-----\ncertificate\n-----END CERTIFICATE-----\n")
+	keyPEM := []byte("-----BEGIN PRIVATE KEY-----\nkey\n-----END PRIVATE KEY-----\n")
+	if err := client.SendTLSCertificate(certPEM, keyPEM); err != nil {
+		t.Fatalf("SendTLSCertificate() error = %v", err)
+	}
+	select {
+	case got := <-received:
+		if !bytes.Equal(got.cert, certPEM) || !bytes.Equal(got.key, keyPEM) {
+			t.Fatalf("received certificate = %q / %q, want %q / %q", got.cert, got.key, certPEM, keyPEM)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("server did not receive the TLS certificate")
+	}
+}
+
+func TestSplitClientTLSCertificateRejectionIsReturned(t *testing.T) {
+	_, client := startConfiguredTestSplitPair(t, func(context.Context, SendRequest) error { return nil }, nil, nil, nil, func(server *Server) {
+		server.OnTLSCertificate = func([]byte, []byte) error {
+			return errors.New("certificate rejected for test")
+		}
+	})
+	err := client.SendTLSCertificate([]byte("certificate"), []byte("key"))
+	if err == nil || !strings.Contains(err.Error(), "certificate rejected for test") {
+		t.Fatalf("SendTLSCertificate() error = %v, want the server's rejection", err)
+	}
+}
+
+func TestSplitServerWithoutTLSCertificateHandlerRejectsCertificate(t *testing.T) {
+	_, client := startTestSplitPair(t, func(context.Context, SendRequest) error { return nil }, nil)
+	err := client.SendTLSCertificate([]byte("certificate"), []byte("key"))
+	if err == nil || !strings.Contains(err.Error(), "peer does not accept TLS certificates") {
+		t.Fatalf("SendTLSCertificate() error = %v, want unsupported-peer error", err)
+	}
+}
+
+func TestParseTLSCertificateRejectsMalformedPayloads(t *testing.T) {
+	valid := marshalTLSCertificateWithStreamID(7, []byte("certificate"), []byte("key"))
+	streamID, certPEM, keyPEM, err := parseTLSCertificateWithStreamID(valid)
+	if err != nil || streamID != 7 || string(certPEM) != "certificate" || string(keyPEM) != "key" {
+		t.Fatalf("parseTLSCertificateWithStreamID(valid) = %d, %q, %q, %v", streamID, certPEM, keyPEM, err)
+	}
+
+	tests := map[string][]byte{
+		"trailing data": append(append([]byte(nil), valid...), 0),
+		"truncated":     valid[:len(valid)-1],
+		"empty key":     marshalTLSCertificateWithStreamID(7, []byte("certificate"), nil),
+	}
+	for name, payload := range tests {
+		t.Run(name, func(t *testing.T) {
+			if _, _, _, err := parseTLSCertificateWithStreamID(payload); err == nil {
+				t.Fatal("parseTLSCertificateWithStreamID() succeeded, want an error")
+			}
+		})
+	}
 }
 
 func TestSplitLinkWithoutClientDeliveryHandlerReturnsError(t *testing.T) {
@@ -149,6 +266,11 @@ func startTestSplitPair(t *testing.T, serverDeliver, clientDeliver func(context.
 
 func startTestSplitPairWithCallbacks(t *testing.T, serverDeliver, clientDeliver func(context.Context, SendRequest) error, clientSubmit func(context.Context, SendRequest) error, clientAuthenticate func(context.Context, string, string) (bool, error), loggers ...*slog.Logger) (*Server, *Client) {
 	t.Helper()
+	return startConfiguredTestSplitPair(t, serverDeliver, clientDeliver, clientSubmit, clientAuthenticate, nil, loggers...)
+}
+
+func startConfiguredTestSplitPair(t *testing.T, serverDeliver, clientDeliver func(context.Context, SendRequest) error, clientSubmit func(context.Context, SendRequest) error, clientAuthenticate func(context.Context, string, string) (bool, error), configureServer func(*Server), loggers ...*slog.Logger) (*Server, *Client) {
+	t.Helper()
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -172,6 +294,9 @@ func startTestSplitPairWithCallbacks(t *testing.T, serverDeliver, clientDeliver 
 		OnReady:     func() { ready <- struct{}{} },
 		OnConnected: func() { serverConnected <- struct{}{} },
 		Deliver:     serverDeliver,
+	}
+	if configureServer != nil {
+		configureServer(server)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	serverDone := make(chan error, 1)

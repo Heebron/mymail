@@ -9,10 +9,13 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/json"
+	"encoding/pem"
 	"log/slog"
 	"math/big"
 	"net"
 	"net/url"
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -169,6 +172,83 @@ func generateTestTLSCertificateWithExpiry(t *testing.T, subject pkix.Name, dnsNa
 	return tls.Certificate{
 		Certificate: [][]byte{der},
 		PrivateKey:  key,
+	}
+}
+
+func writeTestTLSCertificatePair(t *testing.T, certFile, keyFile string, certificate tls.Certificate) {
+	t.Helper()
+	privateKey, ok := certificate.PrivateKey.(*rsa.PrivateKey)
+	if !ok {
+		t.Fatalf("test certificate private key has type %T, want *rsa.PrivateKey", certificate.PrivateKey)
+	}
+	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: certificate.Certificate[0]})
+	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(privateKey)})
+	if err := os.WriteFile(certFile, certPEM, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(keyFile, keyPEM, 0600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestLoadSplitTLSConfigUsesDedicatedCertificate(t *testing.T) {
+	tmpDir := t.TempDir()
+	mainCertFile := filepath.Join(tmpDir, "main.crt")
+	mainKeyFile := filepath.Join(tmpDir, "main.key")
+	splitCertFile := filepath.Join(tmpDir, "split.crt")
+	splitKeyFile := filepath.Join(tmpDir, "split.key")
+	writeTestTLSCertificatePair(t, mainCertFile, mainKeyFile, generateTestTLSCertificate(t, pkix.Name{CommonName: "main.example.test"}, nil, nil, nil, nil))
+	writeTestTLSCertificatePair(t, splitCertFile, splitKeyFile, generateTestTLSCertificate(t, pkix.Name{CommonName: "split.example.test"}, nil, nil, nil, nil))
+
+	var output bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&output, nil))
+	tlsConfig, err := loadSplitTLSConfig(&config.Config{
+		TLSCertFile:      mainCertFile,
+		TLSKeyFile:       mainKeyFile,
+		SplitTLSCertFile: splitCertFile,
+		SplitTLSKeyFile:  splitKeyFile,
+	}, logger)
+	if err != nil {
+		t.Fatalf("loadSplitTLSConfig() error = %v", err)
+	}
+	leaf, err := x509.ParseCertificate(tlsConfig.Certificates[0].Certificate[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if leaf.Subject.CommonName != "split.example.test" {
+		t.Fatalf("split certificate CN = %q, want split.example.test", leaf.Subject.CommonName)
+	}
+	if !strings.Contains(output.String(), splitCertFile) || !strings.Contains(output.String(), "split.example.test") {
+		t.Fatalf("dedicated split certificate was not logged: %s", output.String())
+	}
+}
+
+func TestLoadSplitTLSConfigFallsBackToMainCertificate(t *testing.T) {
+	tmpDir := t.TempDir()
+	mainCertFile := filepath.Join(tmpDir, "main.crt")
+	mainKeyFile := filepath.Join(tmpDir, "main.key")
+	writeTestTLSCertificatePair(t, mainCertFile, mainKeyFile, generateTestTLSCertificate(t, pkix.Name{CommonName: "main.example.test"}, nil, nil, nil, nil))
+
+	tlsConfig, err := loadSplitTLSConfig(&config.Config{TLSCertFile: mainCertFile, TLSKeyFile: mainKeyFile}, nil)
+	if err != nil {
+		t.Fatalf("loadSplitTLSConfig() error = %v", err)
+	}
+	leaf, err := x509.ParseCertificate(tlsConfig.Certificates[0].Certificate[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if leaf.Subject.CommonName != "main.example.test" {
+		t.Fatalf("fallback certificate CN = %q, want main.example.test", leaf.Subject.CommonName)
+	}
+}
+
+func TestLoadSplitTLSConfigMissingCertificateReturnsError(t *testing.T) {
+	_, err := loadSplitTLSConfig(&config.Config{
+		TLSCertFile: "/missing/main.crt",
+		TLSKeyFile:  "/missing/main.key",
+	}, nil)
+	if err == nil {
+		t.Fatal("loadSplitTLSConfig() succeeded with missing certificate files")
 	}
 }
 

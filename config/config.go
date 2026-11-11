@@ -3,13 +3,16 @@ package config
 
 import (
 	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/hex"
 	"errors"
 	"fmt"
 	"net"
 	"os"
 	"strings"
+	"sync"
 
+	"golang.org/x/crypto/bcrypt"
 	"gopkg.in/yaml.v3"
 	"mymail/auth"
 	"mymail/dkim"
@@ -18,10 +21,12 @@ import (
 
 // User contains one login account, its mailbox mapping, and aliases.
 type User struct {
-	// Password is a cleartext password. Prefer PasswordSHA256 in deployments.
+	// Password is a cleartext password. Prefer PasswordHash in deployments.
 	Password string `yaml:"password,omitempty"`
 	// PasswordSHA256 is a lowercase hexadecimal SHA-256 password hash.
 	PasswordSHA256 string `yaml:"password_sha256,omitempty"`
+	// PasswordHash is a bcrypt password hash.
+	PasswordHash string `yaml:"password_hash,omitempty"`
 	// Mailbox is the directory name below maildir_root. It defaults to the
 	// configured username.
 	Mailbox string `yaml:"mailbox,omitempty"`
@@ -104,18 +109,26 @@ type Config struct {
 	// local side). Either split_listen or split_connect is required when
 	// split_mode is "on"; both can be set for full bidirectional operation.
 	SplitListen string `yaml:"split_listen,omitempty"`
+	// SplitTLSCertFile and SplitTLSKeyFile identify the certificate pair used
+	// on the split link. When omitted, the main TLS certificate pair is used.
+	SplitTLSCertFile string `yaml:"split_tls_cert_file,omitempty"`
+	SplitTLSKeyFile  string `yaml:"split_tls_key_file,omitempty"`
 	// SplitConnect is the TCP address of the peer split server. When set, this
 	// instance acts as the "local" side (connects to the remote to forward
 	// non-local mail). A local-only instance works normally even when the
 	// remote is unreachable, falling back to direct MX relay.
 	SplitConnect string `yaml:"split_connect,omitempty"`
-	// SplitCACertFile is an optional CA certificate file used to verify the
-	// peer's certificate on the split link. If omitted, the system pool is
-	// used.
+	// SplitCACertFile is the CA certificate file used to verify client
+	// certificates accepted by the split listener and the peer's certificate on
+	// the split link.
 	SplitCACertFile string `yaml:"split_ca_cert_file,omitempty"`
 	// SplitInsecureSkipVerify disables certificate verification for the remote
 	// peer on the local side's outbound split connection.
 	SplitInsecureSkipVerify bool `yaml:"split_insecure_skip_verify,omitempty"`
+	// SplitIgnoreServerName skips only hostname verification for the remote
+	// peer on the local side's outbound split connection. Certificate chain
+	// verification remains enabled.
+	SplitIgnoreServerName bool `yaml:"split_ignore_server_name,omitempty"`
 	// SplitLocalClientDN is the expected X.509 subject DN of the local side's
 	// client certificate. When set on the remote, the split connection is
 	// rejected unless the connecting client's certificate subject matches
@@ -166,6 +179,8 @@ func (c *Config) expandEnvironment() {
 	c.IMAPTLSListen = expandEnvironment(c.IMAPTLSListen)
 	c.TLSCertFile = expandEnvironment(c.TLSCertFile)
 	c.TLSKeyFile = expandEnvironment(c.TLSKeyFile)
+	c.SplitTLSCertFile = expandEnvironment(c.SplitTLSCertFile)
+	c.SplitTLSKeyFile = expandEnvironment(c.SplitTLSKeyFile)
 	c.MaildirRoot = expandEnvironment(c.MaildirRoot)
 	c.Hostname = expandEnvironment(c.Hostname)
 	c.HealthListen = expandEnvironment(c.HealthListen)
@@ -189,6 +204,7 @@ func (c *Config) expandEnvironment() {
 	for username, user := range c.Users {
 		user.Password = expandEnvironment(user.Password)
 		user.PasswordSHA256 = expandEnvironment(user.PasswordSHA256)
+		user.PasswordHash = expandPasswordHashEnvironment(user.PasswordHash)
 		user.Mailbox = expandEnvironment(user.Mailbox)
 		for index, alias := range user.Aliases {
 			user.Aliases[index] = expandEnvironment(alias)
@@ -211,6 +227,13 @@ func expandEnvironment(value string) string {
 	})
 }
 
+func expandPasswordHashEnvironment(value string) string {
+	if strings.HasPrefix(value, "$2a$") || strings.HasPrefix(value, "$2b$") || strings.HasPrefix(value, "$2y$") {
+		return value
+	}
+	return expandEnvironment(value)
+}
+
 // HasDKIM reports whether all four required DKIM configuration items
 // (domain, private key, public key, and selector) are present.
 func (c *Config) HasDKIM() bool {
@@ -226,12 +249,13 @@ func (c *Config) Validate() error {
 		return errors.New("smtp_relay_network must be tcp, tcp4, or tcp6")
 	}
 	splitEnabled := strings.TrimSpace(c.SplitMode) == "on"
+	remoteOnly := splitEnabled && c.IsSplitRemote() && !c.IsSplitLocal()
 	if splitEnabled {
 		if err := validateSplitConfig(c); err != nil {
 			return err
 		}
 	}
-	if strings.TrimSpace(c.SMTPTLSListen) != "" && (strings.TrimSpace(c.TLSCertFile) == "" || strings.TrimSpace(c.TLSKeyFile) == "") {
+	if !remoteOnly && strings.TrimSpace(c.SMTPTLSListen) != "" && (strings.TrimSpace(c.TLSCertFile) == "" || strings.TrimSpace(c.TLSKeyFile) == "") {
 		return errors.New("smtp_tls_listen requires tls_cert_file and tls_key_file")
 	}
 	if splitEnabled && c.IsSplitRemote() {
@@ -247,10 +271,13 @@ func (c *Config) Validate() error {
 	hasTLSListener := strings.TrimSpace(c.IMAPTLSListen) != "" || strings.TrimSpace(c.SMTPTLSListen) != ""
 	hasTLSFiles := strings.TrimSpace(c.TLSCertFile) != "" || strings.TrimSpace(c.TLSKeyFile) != ""
 	hasTLSCertAndKey := strings.TrimSpace(c.TLSCertFile) != "" && strings.TrimSpace(c.TLSKeyFile) != ""
-	if (hasTLSListener || hasTLSFiles || c.IMAPRequireSTARTTLS) && !hasTLSCertAndKey {
+	if hasTLSFiles && !hasTLSCertAndKey {
 		return errors.New("tls_cert_file and tls_key_file must be configured together")
 	}
-	if strings.TrimSpace(c.SMTPListen) != "" && !hasTLSCertAndKey {
+	if !remoteOnly && (hasTLSListener || c.IMAPRequireSTARTTLS) && !hasTLSCertAndKey {
+		return errors.New("tls_cert_file and tls_key_file must be configured together")
+	}
+	if !remoteOnly && strings.TrimSpace(c.SMTPListen) != "" && !hasTLSCertAndKey {
 		return errors.New("smtp_listen requires tls_cert_file and tls_key_file because STARTTLS is always required")
 	}
 	if strings.TrimSpace(c.Hostname) == "" {
@@ -324,8 +351,13 @@ func (c *Config) Validate() error {
 		if strings.TrimSpace(username) == "" || strings.ContainsAny(username, "/\\") {
 			return fmt.Errorf("invalid username %q", username)
 		}
-		if user.Password == "" && user.PasswordSHA256 == "" {
+		if user.Password == "" && user.PasswordSHA256 == "" && user.PasswordHash == "" {
 			return fmt.Errorf("user %q has no password", username)
+		}
+		if user.PasswordHash != "" {
+			if _, err := bcrypt.Cost([]byte(user.PasswordHash)); err != nil {
+				return fmt.Errorf("user %q has invalid bcrypt password_hash: %w", username, err)
+			}
 		}
 		if user.Mailbox != "" && strings.ContainsAny(user.Mailbox, "/\\\r\n") {
 			return fmt.Errorf("user %q has invalid mailbox", username)
@@ -374,18 +406,38 @@ func (c *Config) IsSplitLocal() bool {
 	return strings.TrimSpace(c.SplitConnect) != ""
 }
 
+// SplitCertificateFiles returns the split TLS certificate pair when set,
+// otherwise it falls back to the main TLS certificate pair.
+func (c *Config) SplitCertificateFiles() (certFile, keyFile string) {
+	if strings.TrimSpace(c.SplitTLSCertFile) != "" || strings.TrimSpace(c.SplitTLSKeyFile) != "" {
+		return c.SplitTLSCertFile, c.SplitTLSKeyFile
+	}
+	return c.TLSCertFile, c.TLSKeyFile
+}
+
 func validateSplitConfig(c *Config) error {
 	listen := strings.TrimSpace(c.SplitListen)
 	connect := strings.TrimSpace(c.SplitConnect)
 	if c.SplitInsecureSkipVerify && connect == "" {
 		return errors.New("split_insecure_skip_verify requires split_connect")
 	}
+	if c.SplitIgnoreServerName && connect == "" {
+		return errors.New("split_ignore_server_name requires split_connect")
+	}
 	if listen == "" && connect == "" {
 		return errors.New("split_listen or split_connect is required when split_mode is 'on'")
 	}
-	// Check that TLS cert/key are provided for the split link.
-	if strings.TrimSpace(c.TLSCertFile) == "" || strings.TrimSpace(c.TLSKeyFile) == "" {
-		return errors.New("split mode requires tls_cert_file and tls_key_file")
+	if listen != "" && strings.TrimSpace(c.SplitCACertFile) == "" {
+		return errors.New("split_listen requires split_ca_cert_file to authenticate local client certificates")
+	}
+	splitCertFile := strings.TrimSpace(c.SplitTLSCertFile)
+	splitKeyFile := strings.TrimSpace(c.SplitTLSKeyFile)
+	if (splitCertFile == "") != (splitKeyFile == "") {
+		return errors.New("split_tls_cert_file and split_tls_key_file must be configured together")
+	}
+	certFile, keyFile := c.SplitCertificateFiles()
+	if strings.TrimSpace(certFile) == "" || strings.TrimSpace(keyFile) == "" {
+		return errors.New("split mode requires split_tls_cert_file and split_tls_key_file, or tls_cert_file and tls_key_file")
 	}
 	return nil
 }
@@ -500,17 +552,41 @@ func (c *Config) IsLocalDomain(domain string) bool {
 	return false
 }
 
-// Authenticate verifies a user's cleartext or SHA-256 password.
+// Authenticate verifies a user's bcrypt, cleartext, or SHA-256 password.
 func (c *Config) Authenticate(username, password string) bool {
 	user, ok := c.findUser(username)
 	if !ok {
+		_ = bcrypt.CompareHashAndPassword(dummyBcryptPasswordHash(), []byte(password))
 		return false
 	}
-	if user.Password != "" {
-		return user.Password == password
+	if user.PasswordHash != "" {
+		return bcrypt.CompareHashAndPassword([]byte(user.PasswordHash), []byte(password)) == nil
 	}
-	hash := sha256.Sum256([]byte(password))
-	return strings.EqualFold(user.PasswordSHA256, hex.EncodeToString(hash[:]))
+	if user.Password != "" {
+		configuredHash := sha256.Sum256([]byte(user.Password))
+		providedHash := sha256.Sum256([]byte(password))
+		return subtle.ConstantTimeCompare(configuredHash[:], providedHash[:]) == 1
+	}
+	configuredHash, err := hex.DecodeString(user.PasswordSHA256)
+	var expected [sha256.Size]byte
+	if err == nil {
+		copy(expected[:], configuredHash)
+	}
+	providedHash := sha256.Sum256([]byte(password))
+	matched := subtle.ConstantTimeCompare(expected[:], providedHash[:]) == 1
+	return err == nil && len(configuredHash) == sha256.Size && matched
+}
+
+var (
+	dummyBcryptHashOnce sync.Once
+	dummyBcryptHash     []byte
+)
+
+func dummyBcryptPasswordHash() []byte {
+	dummyBcryptHashOnce.Do(func() {
+		dummyBcryptHash, _ = bcrypt.GenerateFromPassword([]byte("mymail-unknown-user-dummy-password"), bcrypt.DefaultCost)
+	})
+	return dummyBcryptHash
 }
 
 func (c *Config) findUser(username string) (User, bool) {

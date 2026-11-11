@@ -1,0 +1,74 @@
+# Local split instance: runs behind the home/ISP firewall, stores mail, and
+# serves IMAP. The remote instance accepts external SMTP and relays messages.
+# For the complete split design and certificate requirements, see README.md
+# and SECURITY.md.
+
+smtp_listen: 0.0.0.0:587
+# This instance receives inbound mail through the remote split peer, so a
+# public port-25 listener is usually unnecessary. Set an address here only if
+# direct inbound SMTP is intentionally required.
+smtp_cleartext_listen: ""
+smtp_tls_listen: 0.0.0.0:465
+
+imap_listen: 0.0.0.0:143
+imap_require_starttls: true
+imap_tls_listen: 0.0.0.0:993
+
+# Public SMTP/IMAP certificate. After each split connection the local also
+# sends this pair to the remote, which serves it on its SMTP listeners, so
+# certificate renewal happens only here. The files are re-read on every
+# reconnect. Nothing is sent when split_insecure_skip_verify is enabled.
+tls_cert_file: /etc/mymail/tls.crt
+tls_key_file: /etc/mymail/tls.key
+maildir_root: /var/lib/mymail/users
+hostname: mail.example.test
+health_listen: 127.0.0.1:8080
+
+# Authentication throttling applies to SMTP and IMAP.
+auth_throttle:
+  max_attempts_per_connection: 5
+  max_failures_per_ip: 20
+  max_failures_per_account: 10
+  backoff_base: 1s
+  backoff_max: 1m
+  failure_window: 15m
+
+# Add DKIM settings here on the local side. Outgoing mail is signed locally
+# before it is sent to the remote instance; do not configure DKIM on the remote.
+# dkim:
+#   domain: example.test
+#   private_key_file: /etc/mymail/dkim-private.pem
+#   public_key_file: /etc/mymail/dkim-public.pem
+#   selector: mail
+
+# User accounts and credentials are configured only on the local instance.
+# It publishes mailbox addresses and aliases to the remote and handles the
+# remote's SMTP authentication requests over the split link.
+users:
+  user@example.test:
+    # Generate with mymail-password and set this environment variable to the
+    # resulting bcrypt hash before starting MyMail.
+    password_hash: ${MYMAIL_USER_PASSWORD_HASH}
+    mailbox: user
+
+split_mode: "on"
+split_connect: 203.0.113.20:1783 # Replace with the remote instance's address.
+# This skips only the remote certificate name check because split_connect is
+# an IP address; certificate chain, expiry, and server-auth usage are checked.
+# Pair it with the private split_ca_cert_file below so that only certificates
+# from your split CA are accepted.
+split_ignore_server_name: true
+
+# Dedicated client certificate sent to the remote. It must be signed by the
+# remote's split_ca_cert_file and permit TLS client authentication.
+split_tls_cert_file: /etc/mymail/split-client.crt
+split_tls_key_file: /etc/mymail/split-client.key
+
+# CA that signed the remote's split_tls_cert_file. It replaces the system CAs
+# for the split link only. Omit it only if the remote's split listener uses a
+# publicly trusted certificate. The remote's split_ca_cert_file separately
+# authenticates this local client's certificate.
+split_ca_cert_file: /etc/mymail/split-ca.crt
+# Do not use this as a substitute for trusting the split CA. When enabled, the
+# public tls_cert_file pair is not sent to the unverified remote.
+# split_insecure_skip_verify: false

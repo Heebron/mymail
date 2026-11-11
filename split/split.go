@@ -14,7 +14,8 @@
 //
 // Frame types:
 //
-//	TypeHandshake (0x00) — protocol handshake; first frame on every connection.
+//	TypeHandshake (0x00) — protocol handshake; each side sends exactly one as
+//	the first frame on every connection.
 //	Payload: [4 byte magic] where magic is 0xABBA for protocol version 1.
 //
 //	TypeMailboxList (0x02) — local sends its mailbox addresses to the remote.
@@ -29,6 +30,9 @@
 //
 //	TypeAuth (0x04) — the remote asks the local side to authenticate SMTP credentials.
 //	Payload: [4 byte streamID][4 byte usernameLen][username bytes][4 byte passwordLen][password bytes]
+//
+//	TypeTLSCertificate (0x05) — the local sends the remote its SMTP server certificate and key.
+//	Payload: [4 byte streamID][4 byte certLen][certificate PEM][4 byte keyLen][private key PEM]
 //
 //	TypeAck (0x10) — positive acknowledgement for a delivered frame.
 //	Payload: [4 byte streamID]
@@ -59,13 +63,14 @@ const ProtocolMagic = 0xABBA
 
 // Frame types exchanged over the split TLS link.
 const (
-	TypeHandshake   byte = 0x00
-	TypeSendMail    byte = 0x01
-	TypeMailboxList byte = 0x02
-	TypeSubmitMail  byte = 0x03
-	TypeAuth        byte = 0x04
-	TypeAck         byte = 0x10
-	TypeErr         byte = 0x11
+	TypeHandshake      byte = 0x00
+	TypeSendMail       byte = 0x01
+	TypeMailboxList    byte = 0x02
+	TypeSubmitMail     byte = 0x03
+	TypeAuth           byte = 0x04
+	TypeTLSCertificate byte = 0x05
+	TypeAck            byte = 0x10
+	TypeErr            byte = 0x11
 )
 
 // ErrAuthRejected reports that the local side rejected SMTP credentials.
@@ -107,6 +112,8 @@ type link struct {
 
 	// onMailboxList callback for incoming MailboxList frames (server-side).
 	onMailboxList func(addresses []string)
+	// onTLSCertificate receives a TLS certificate sent by the local peer.
+	onTLSCertificate func(certPEM, keyPEM []byte) error
 
 	// done is closed when the reader loop exits.
 	done chan struct{}
@@ -125,18 +132,20 @@ func newLink(c net.Conn, log *slog.Logger, reader *bufio.Reader, writer *bufio.W
 	submit func(ctx context.Context, req SendRequest) error,
 	authenticate func(ctx context.Context, username, password string) (bool, error),
 	onMailboxList func(addresses []string),
+	onTLSCertificate func(certPEM, keyPEM []byte) error,
 ) *link {
 	l := &link{
-		c:             c,
-		log:           log,
-		reader:        reader,
-		writer:        writer,
-		pending:       make(map[uint32]chan response),
-		deliver:       deliver,
-		submit:        submit,
-		authenticate:  authenticate,
-		onMailboxList: onMailboxList,
-		done:          make(chan struct{}),
+		c:                c,
+		log:              log,
+		reader:           reader,
+		writer:           writer,
+		pending:          make(map[uint32]chan response),
+		deliver:          deliver,
+		submit:           submit,
+		authenticate:     authenticate,
+		onMailboxList:    onMailboxList,
+		onTLSCertificate: onTLSCertificate,
+		done:             make(chan struct{}),
 	}
 	l.nextStreamID.Store(1)
 	return l
@@ -194,12 +203,23 @@ func (l *link) readLoop() {
 			}
 			l.log.Info("split Auth received", "stream", streamID, "username", username)
 			go l.handleAuthenticate(streamID, username, password)
+		case TypeTLSCertificate:
+			streamID, certPEM, keyPEM, err := parseTLSCertificateWithStreamID(frameData)
+			if err != nil {
+				l.log.Warn("split malformed TLS certificate", "error", err)
+				go l.writeErr(streamID, "malformed TLS certificate")
+				continue
+			}
+			go l.handleTLSCertificate(streamID, certPEM, keyPEM)
 		case TypeAck:
 			streamID := parseStreamIDFromAck(frameData)
 			l.respondPending(streamID, response{ok: true})
 		case TypeErr:
 			streamID, errMsg := parseStreamIDAndErr(frameData)
 			l.respondPending(streamID, response{ok: false, err: errMsg})
+		case TypeHandshake:
+			// Older servers sent a second handshake frame after the exchange.
+			l.log.Debug("split ignoring duplicate handshake frame")
 		case TypeMailboxList:
 			streamID, addresses, err := parseMailboxListWithStreamID(frameData)
 			if err != nil {
@@ -276,6 +296,20 @@ func (l *link) handleAuthenticate(streamID uint32, username, password string) {
 		return
 	}
 	l.log.Info("split Auth accepted", "stream", streamID, "username", username)
+	l.writeAck(streamID)
+}
+
+func (l *link) handleTLSCertificate(streamID uint32, certPEM, keyPEM []byte) {
+	if l.onTLSCertificate == nil {
+		l.writeErr(streamID, "peer does not accept TLS certificates")
+		return
+	}
+	if err := l.onTLSCertificate(certPEM, keyPEM); err != nil {
+		l.log.Warn("split TLS certificate rejected", "stream", streamID, "error", err)
+		l.writeErr(streamID, err.Error())
+		return
+	}
+	l.log.Info("split TLS certificate accepted", "stream", streamID, "certificate_bytes", len(certPEM))
 	l.writeAck(streamID)
 }
 
@@ -482,6 +516,10 @@ type Server struct {
 	// incoming SMTP recipients should be forwarded back to the local.
 	OnMailboxList func(addresses []string)
 
+	// OnTLSCertificate validates and installs the SMTP certificate received from
+	// the local peer. It is optional; when nil, certificate updates are rejected.
+	OnTLSCertificate func(certPEM, keyPEM []byte) error
+
 	// OnConnected is called when a peer connection completes its handshake
 	// successfully. Only one peer can be connected at a time; a new
 	// connection will reject the peer if one is already connected.
@@ -628,6 +666,32 @@ func (s *Server) handleConn(c net.Conn) {
 	}()
 	remote := c.RemoteAddr().String()
 	s.Logger.Info("split connection accepted", "remote", remote)
+	if tlsConn, ok := c.(*tls.Conn); ok {
+		parent := s.ctx
+		if parent == nil {
+			parent = context.Background()
+		}
+		deadline := time.Now().Add(30 * time.Second)
+		if err := tlsConn.SetDeadline(deadline); err != nil {
+			s.Logger.Warn("split TLS handshake deadline set failed", "remote", remote, "error", err)
+			return
+		}
+		ctx, cancel := context.WithDeadline(parent, deadline)
+		err := tlsConn.HandshakeContext(ctx)
+		cancel()
+		if err != nil {
+			attrs := []any{"remote", remote, "error", err, "reason", explainTLSError(err, "server")}
+			attrs = append(attrs, certificateLogAttrs("server_certificate", configuredCertificate(s.TLSConfig))...)
+			attrs = append(attrs, certificateLogAttrs("client_certificate", verificationCertificate(err))...)
+			s.Logger.Warn("split TLS handshake failed", attrs...)
+			s.onDisconnected()
+			return
+		}
+		if err := tlsConn.SetDeadline(time.Time{}); err != nil {
+			s.Logger.Warn("split TLS handshake deadline clear failed", "remote", remote, "error", err)
+			return
+		}
+	}
 
 	// Verify client certificate DN if configured.
 	if s.ExpectedClientDN != "" {
@@ -697,17 +761,8 @@ func (s *Server) handleConn(c net.Conn) {
 	}
 	s.Logger.Info("split handshake completed", "remote", remote)
 
-	// Send handshake response back.
-	handshakeData = make([]byte, 4)
-	binary.BigEndian.PutUint32(handshakeData, ProtocolMagic)
-	if err := writeFrame(writer, TypeHandshake, handshakeData); err != nil {
-		s.Logger.Warn("split handshake response write error", "remote", remote, "error", err)
-		s.onDisconnected()
-		return
-	}
-
 	// Create the multiplexed link wrapper and start the reader loop.
-	ln := newLink(c, s.Logger, reader, writer, s.Deliver, nil, nil, s.OnMailboxList)
+	ln := newLink(c, s.Logger, reader, writer, s.Deliver, nil, nil, s.OnMailboxList, s.OnTLSCertificate)
 	s.activeMu.Lock()
 	s.activeLn = ln
 	s.activeMu.Unlock()
@@ -750,9 +805,10 @@ const reconnectInterval = 10 * time.Second
 // automatic reconnection and multiplexed I/O so multiple requests can be in
 // flight simultaneously.
 type Client struct {
-	Addr      string
-	TLSConfig *tls.Config
-	Logger    *slog.Logger
+	Addr             string
+	TLSConfig        *tls.Config
+	IgnoreServerName bool
+	Logger           *slog.Logger
 	// Deliver handles mail sent by the peer over the split connection.
 	Deliver func(ctx context.Context, req SendRequest) error
 	// Submit handles a submission request sent by the peer.
@@ -810,6 +866,28 @@ func (c *Client) SendMailboxList(addresses []string) error {
 		c.Logger.Info("split mailbox list sent", "count", len(addresses))
 	}
 	return err
+}
+
+// SendTLSCertificate sends the local SMTP certificate and its private key to
+// the connected remote over the mutually authenticated split TLS link.
+func (c *Client) SendTLSCertificate(certPEM, keyPEM []byte) error {
+	if c.Logger == nil {
+		c.Logger = slog.Default()
+	}
+	ln := c.getClientLink()
+	if ln == nil {
+		return errors.New("no active split connection")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	_, err := ln.request(ctx, TypeTLSCertificate, "TLSCertificate", func(streamID uint32) []byte {
+		return marshalTLSCertificateWithStreamID(streamID, certPEM, keyPEM)
+	}, nil)
+	if err != nil {
+		return err
+	}
+	c.Logger.Info("split TLS certificate sent", "certificate_bytes", len(certPEM))
+	return nil
 }
 
 // IsConnected reports whether the client currently has an active connection
@@ -897,13 +975,17 @@ func (c *Client) Wait() {
 // Caller must NOT hold c.connMu.
 func (c *Client) dialAndHandshake(ctx context.Context) (net.Conn, *link, error) {
 	dialer := &net.Dialer{Timeout: 10 * time.Second}
+	tlsConfig := c.TLSConfig
+	if c.IgnoreServerName && (tlsConfig == nil || !tlsConfig.InsecureSkipVerify) {
+		tlsConfig = verifyChainIgnoringServerName(tlsConfig)
+	}
 	tlsDialer := &tls.Dialer{
-		Config:    c.TLSConfig,
+		Config:    tlsConfig,
 		NetDialer: dialer,
 	}
 	conn, err := tlsDialer.DialContext(ctx, "tcp", c.Addr)
 	if err != nil {
-		return nil, nil, fmt.Errorf("dial split %s: %w", c.Addr, err)
+		return nil, nil, fmt.Errorf("dial split %s: %w; TLS diagnosis: %s", c.Addr, err, explainTLSError(err, "client"))
 	}
 	writer := bufio.NewWriter(conn)
 	reader := bufio.NewReader(conn)
@@ -913,7 +995,7 @@ func (c *Client) dialAndHandshake(ctx context.Context) (net.Conn, *link, error) 
 	binary.BigEndian.PutUint32(handshakeData, ProtocolMagic)
 	if err := writeFrame(writer, TypeHandshake, handshakeData); err != nil {
 		conn.Close()
-		return nil, nil, fmt.Errorf("split handshake write: %w", err)
+		return nil, nil, fmt.Errorf("split handshake write: %w; TLS diagnosis: %s", err, explainTLSError(err, "client"))
 	}
 	// Read the handshake response in a goroutine so context cancellation
 	// can interrupt a blocking read.
@@ -934,7 +1016,7 @@ func (c *Client) dialAndHandshake(ctx context.Context) (net.Conn, *link, error) 
 	case result := <-frameCh:
 		if result.err != nil {
 			conn.Close()
-			return nil, nil, fmt.Errorf("split handshake read: %w", result.err)
+			return nil, nil, fmt.Errorf("split handshake read: %w; TLS diagnosis: %s", result.err, explainTLSError(result.err, "client"))
 		}
 		if result.typ != TypeHandshake {
 			conn.Close()
@@ -952,7 +1034,7 @@ func (c *Client) dialAndHandshake(ctx context.Context) (net.Conn, *link, error) 
 	}
 
 	// Create the multiplexed link wrapper and start the reader loop.
-	ln := newLink(conn, c.Logger, reader, writer, c.Deliver, c.Submit, c.Authenticate, nil)
+	ln := newLink(conn, c.Logger, reader, writer, c.Deliver, c.Submit, c.Authenticate, nil, nil)
 	ln.start()
 
 	return conn, ln, nil
@@ -1079,6 +1161,58 @@ func parseAuthRequestWithStreamID(data []byte) (uint32, string, string, error) {
 		return streamID, "", "", errors.New("unexpected trailing authentication data")
 	}
 	return streamID, username, password, nil
+}
+
+func marshalTLSCertificateWithStreamID(streamID uint32, certPEM, keyPEM []byte) []byte {
+	var buf bytes.Buffer
+	binary.Write(&buf, binary.BigEndian, streamID)
+	writeBytes(&buf, certPEM)
+	writeBytes(&buf, keyPEM)
+	return buf.Bytes()
+}
+
+func parseTLSCertificateWithStreamID(data []byte) (uint32, []byte, []byte, error) {
+	r := bytes.NewReader(data)
+	var streamID uint32
+	if err := binary.Read(r, binary.BigEndian, &streamID); err != nil {
+		return 0, nil, nil, fmt.Errorf("read streamID: %w", err)
+	}
+	certPEM, err := readBytes(r)
+	if err != nil {
+		return streamID, nil, nil, fmt.Errorf("read certificate: %w", err)
+	}
+	keyPEM, err := readBytes(r)
+	if err != nil {
+		return streamID, nil, nil, fmt.Errorf("read private key: %w", err)
+	}
+	if r.Len() != 0 {
+		return streamID, nil, nil, errors.New("unexpected trailing TLS certificate data")
+	}
+	if len(certPEM) == 0 || len(keyPEM) == 0 {
+		return streamID, nil, nil, errors.New("certificate and private key must not be empty")
+	}
+	return streamID, certPEM, keyPEM, nil
+}
+
+func writeBytes(buf *bytes.Buffer, data []byte) {
+	buf.Grow(4 + len(data))
+	binary.Write(buf, binary.BigEndian, uint32(len(data)))
+	buf.Write(data)
+}
+
+func readBytes(r *bytes.Reader) ([]byte, error) {
+	var length uint32
+	if err := binary.Read(r, binary.BigEndian, &length); err != nil {
+		return nil, err
+	}
+	if uint64(length) > uint64(r.Len()) {
+		return nil, io.ErrUnexpectedEOF
+	}
+	data := make([]byte, int(length))
+	if _, err := io.ReadFull(r, data); err != nil {
+		return nil, err
+	}
+	return data, nil
 }
 
 func parseStreamIDFromAck(data []byte) uint32 {

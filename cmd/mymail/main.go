@@ -42,6 +42,7 @@ type configLogUser struct {
 	Aliases           []string `json:"aliases,omitempty"`
 	HasPassword       bool     `json:"has_password"`
 	HasPasswordSHA256 bool     `json:"has_password_sha256"`
+	HasPasswordHash   bool     `json:"has_password_hash"`
 }
 
 func configLogUsers(users map[string]config.User) map[string]configLogUser {
@@ -52,9 +53,23 @@ func configLogUsers(users map[string]config.User) map[string]configLogUser {
 			Aliases:           user.Aliases,
 			HasPassword:       user.Password != "",
 			HasPasswordSHA256: user.PasswordSHA256 != "",
+			HasPasswordHash:   user.PasswordHash != "",
 		}
 	}
 	return loggedUsers
+}
+
+func logSHA256PasswordWarnings(logger *slog.Logger, users map[string]config.User) {
+	usernames := make([]string, 0, len(users))
+	for username, user := range users {
+		if user.PasswordSHA256 != "" {
+			usernames = append(usernames, username)
+		}
+	}
+	sort.Strings(usernames)
+	for _, username := range usernames {
+		logger.Warn("configuration user uses unsalted SHA-256 password hash; migrate to password_hash", "username", username)
+	}
 }
 
 func logCleartextPasswordWarnings(logger *slog.Logger, users map[string]config.User) {
@@ -85,6 +100,7 @@ func logConfigUsers(logger *slog.Logger, users map[string]config.User) {
 			"aliases", user.Aliases,
 			"has_password", user.HasPassword,
 			"has_password_sha256", user.HasPasswordSHA256,
+			"has_password_hash", user.HasPasswordHash,
 		)
 	}
 }
@@ -163,6 +179,38 @@ func logTLSCertificate(logger *slog.Logger, cert *tls.Certificate, certFile stri
 		checkTLSCertificateExpiration(logger, cert.Leaf, certFile, time.Now())
 	}
 	return subjectDN, sans, nil
+}
+
+func loadSplitTLSConfig(cfg *config.Config, logger *slog.Logger) (*tls.Config, error) {
+	certFile, keyFile := cfg.SplitCertificateFiles()
+	certificate, err := tls.LoadX509KeyPair(certFile, keyFile)
+	if err != nil {
+		return nil, fmt.Errorf("load split TLS certificate: %w", err)
+	}
+	if certFile != cfg.TLSCertFile || keyFile != cfg.TLSKeyFile {
+		if _, _, err := logTLSCertificate(logger, &certificate, certFile); err != nil {
+			return nil, fmt.Errorf("log split TLS certificate: %w", err)
+		}
+	}
+
+	tlsConfig := &tls.Config{
+		Certificates: []tls.Certificate{certificate},
+		MinVersion:   tls.VersionTLS12,
+	}
+	if cfg.SplitCACertFile != "" {
+		caData, err := os.ReadFile(cfg.SplitCACertFile)
+		if err != nil {
+			return nil, fmt.Errorf("read split CA certificate: %w", err)
+		}
+		caPool := x509.NewCertPool()
+		if !caPool.AppendCertsFromPEM(caData) {
+			return nil, errors.New("parse split CA certificate: no certificates found")
+		}
+		tlsConfig.ClientCAs = caPool
+		tlsConfig.RootCAs = caPool
+		tlsConfig.ClientAuth = tls.RequireAndVerifyClientCert
+	}
+	return tlsConfig, nil
 }
 
 func registerConfiguredPlugins(processors *plugins.Chain, configured []config.PluginConfig) error {
@@ -256,12 +304,14 @@ func main() {
 			"enabled", cfg.HasDKIM(),
 		)
 		logCleartextPasswordWarnings(logger, cfg.Users)
+		logSHA256PasswordWarnings(logger, cfg.Users)
 		logConfigUsers(logger, cfg.Users)
 	}
 
 	// Split mode logging.
 	splitModeLabel := "off"
 	if splitEnabled {
+		splitTLSCertFile, _ := cfg.SplitCertificateFiles()
 		if cfg.IsSplitRemote() && cfg.IsSplitLocal() {
 			splitModeLabel = "local,remote"
 		} else if cfg.IsSplitRemote() {
@@ -274,18 +324,23 @@ func main() {
 				"mode", splitModeLabel,
 				"listen", cfg.SplitListen,
 				"connect", cfg.SplitConnect,
+				"tls_cert_file", splitTLSCertFile,
 				"insecure_skip_verify", cfg.SplitInsecureSkipVerify,
+				"ignore_server_name", cfg.SplitIgnoreServerName,
 			)
 		} else if cfg.IsSplitRemote() {
 			logger.Info("configuration split mode",
 				"mode", splitModeLabel,
 				"listen", cfg.SplitListen,
+				"tls_cert_file", splitTLSCertFile,
 			)
 		} else if cfg.IsSplitLocal() {
 			logger.Info("configuration split mode",
 				"mode", splitModeLabel,
 				"connect", cfg.SplitConnect,
+				"tls_cert_file", splitTLSCertFile,
 				"insecure_skip_verify", cfg.SplitInsecureSkipVerify,
+				"ignore_server_name", cfg.SplitIgnoreServerName,
 			)
 		}
 	}
@@ -304,38 +359,29 @@ func main() {
 			MinVersion:   tls.VersionTLS12,
 		}
 	}
-
-	// Build split TLS config using the main TLS cert/key.
-	buildSplitTLSConfig := func() *tls.Config {
-		certificate, err := tls.LoadX509KeyPair(cfg.TLSCertFile, cfg.TLSKeyFile)
-		if err != nil {
-			fatal("split TLS certificate initialization failed", "error", err)
-			return nil
+	// A remote-only instance serves the SMTP certificate sent by the local over
+	// the split link. A configured tls_cert_file is used until one arrives.
+	var peerCertificates *peerCertificateStore
+	if isRemoteOnly {
+		peerCertificates = newPeerCertificateStore(cfg.Hostname, logger)
+		if tlsConfig != nil {
+			peerCertificates.SetCertificate(&tlsConfig.Certificates[0])
+			logger.Info("SMTP TLS certificate from tls_cert_file will be replaced when the split local sends one")
+		} else {
+			logger.Info("SMTP TLS waiting for a certificate from the split local")
 		}
-		tcp := &tls.Config{
-			Certificates: []tls.Certificate{certificate},
-			MinVersion:   tls.VersionTLS12,
+		tlsConfig = &tls.Config{
+			GetCertificate: peerCertificates.GetCertificate,
+			MinVersion:     tls.VersionTLS12,
 		}
-		if cfg.SplitCACertFile != "" {
-			caData, err := os.ReadFile(cfg.SplitCACertFile)
-			if err != nil {
-				fatal("split CA certificate read failed", "error", err)
-				return nil
-			}
-			caPool := x509.NewCertPool()
-			if !caPool.AppendCertsFromPEM(caData) {
-				fatal("split CA certificate parse failed")
-				return nil
-			}
-			tcp.ClientCAs = caPool
-			tcp.RootCAs = caPool
-			tcp.ClientAuth = tls.RequireAndVerifyClientCert
-		}
-		return tcp
 	}
+
 	var splitTLSConfig *tls.Config
 	if splitEnabled {
-		splitTLSConfig = buildSplitTLSConfig()
+		splitTLSConfig, err = loadSplitTLSConfig(&cfg, logger)
+		if err != nil {
+			fatal("split TLS certificate initialization failed", "error", err)
+		}
 	}
 	var store *maildir.Store
 	if !splitEnabled || !cfg.IsSplitRemote() {
@@ -424,10 +470,14 @@ func main() {
 			clientTLSConfig.InsecureSkipVerify = true
 			logger.Warn("split remote certificate verification disabled", "address", cfg.SplitConnect)
 		}
+		if cfg.SplitIgnoreServerName && !cfg.SplitInsecureSkipVerify {
+			logger.Warn("split remote hostname verification disabled; certificate chain still verified", "address", cfg.SplitConnect)
+		}
 		splitClient = &split.Client{
-			Addr:      cfg.SplitConnect,
-			TLSConfig: clientTLSConfig,
-			Logger:    logger,
+			Addr:             cfg.SplitConnect,
+			TLSConfig:        clientTLSConfig,
+			IgnoreServerName: cfg.SplitIgnoreServerName,
+			Logger:           logger,
 		}
 	}
 
@@ -437,10 +487,13 @@ func main() {
 	var remoteMailboxesMu sync.Mutex
 	var remoteMailboxes map[string]bool // address -> true
 
-	newSMTPServer := func(addr string, implicitTLSConfig, startTLSConfig *tls.Config, requireSTARTTLS bool) *smtp.Server {
+	newSMTPServer := func(addr string, implicitTLSConfig, startTLSConfig *tls.Config, requireSTARTTLS, requireTLSForAuth bool) *smtp.Server {
 		srv := &smtp.Server{
-			Addr: addr, TLSConfig: implicitTLSConfig, StartTLSConfig: startTLSConfig, RequireSTARTTLS: requireSTARTTLS, Hostname: cfg.Hostname, RelayNetwork: cfg.SMTPRelayNetwork, Store: store,
+			Addr: addr, TLSConfig: implicitTLSConfig, StartTLSConfig: startTLSConfig, RequireSTARTTLS: requireSTARTTLS, RequireTLSForAuth: requireTLSForAuth, Hostname: cfg.Hostname, RelayNetwork: cfg.SMTPRelayNetwork, Store: store,
 			Processors: processors, Resolve: resolve, LocalDomain: localDomain, DKIMSigner: dkimSigner, Authenticate: authenticate, AuthLimiter: authLimiter, Logger: logger,
+		}
+		if peerCertificates != nil {
+			srv.TLSAvailable = peerCertificates.Available
 		}
 		// Remote role: resolve uses the dynamic mailbox cache from the local side.
 		if splitEnabled && cfg.IsSplitRemote() {
@@ -491,12 +544,12 @@ func main() {
 			Authenticate: authenticate, AuthLimiter: authLimiter, Logger: logger,
 		}
 	}
-	smtpServers := []*smtp.Server{newSMTPServer(cfg.SMTPListen, nil, tlsConfig, true)}
+	smtpServers := []*smtp.Server{newSMTPServer(cfg.SMTPListen, nil, tlsConfig, true, false)}
 	if cfg.SMTPCleartextListen != "" {
-		smtpServers = append(smtpServers, newSMTPServer(cfg.SMTPCleartextListen, nil, nil, false))
+		smtpServers = append(smtpServers, newSMTPServer(cfg.SMTPCleartextListen, nil, tlsConfig, false, true))
 	}
 	if cfg.SMTPTLSListen != "" {
-		smtpServers = append(smtpServers, newSMTPServer(cfg.SMTPTLSListen, tlsConfig.Clone(), nil, false))
+		smtpServers = append(smtpServers, newSMTPServer(cfg.SMTPTLSListen, tlsConfig.Clone(), nil, false, false))
 	}
 	if splitClient != nil {
 		splitClient.Deliver = func(ctx context.Context, req split.SendRequest) error {
@@ -526,6 +579,9 @@ func main() {
 			Logger:           logger,
 			Deliver:          splitDeliver,
 			ExpectedClientDN: cfg.SplitLocalClientDN,
+		}
+		if peerCertificates != nil {
+			splitSrv.OnTLSCertificate = peerCertificates.Set
 		}
 	}
 
@@ -612,6 +668,13 @@ func main() {
 			if err := splitClient.SendMailboxList(localMailboxAddresses); err != nil {
 				logger.Error("split mailbox list send failed", "error", err)
 			}
+			// Send the SMTP certificate in the background so an older remote that
+			// never answers cannot delay the reconnect loop.
+			go func() {
+				if err := sendSplitTLSCertificate(&cfg, splitClient.SendTLSCertificate, logger); err != nil {
+					logger.Warn("split TLS certificate send failed; the remote must use its own tls_cert_file", "tls_cert_file", cfg.TLSCertFile, "error", err)
+				}
+			}()
 		}
 		splitClient.OnDisconnected = func() {
 			logger.Info("split disconnected from remote")

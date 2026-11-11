@@ -1,6 +1,9 @@
+# This is a single-instance configuration example. For a split deployment,
+# see config-split-local.yaml and config-split-remote.yaml.
 # SMTP submission always requires STARTTLS before authentication or submission.
 smtp_listen: 0.0.0.0:587
-# Optional cleartext SMTP listener, normally used for port 25 delivery.
+# Optional inbound SMTP listener, normally used for port 25. It accepts
+# ordinary mail without TLS and requires STARTTLS before advertising AUTH.
 smtp_cleartext_listen: 0.0.0.0:25
 # Optional implicit-TLS SMTP submission listener, normally used for port 465.
 smtp_tls_listen: 0.0.0.0:465
@@ -36,8 +39,7 @@ auth_throttle:
   failure_window: 15m
 # Values may use environment variables, for example: ${HOME}/mymail
 maildir_root: /mnt/probox/@email
-# In split mode, the remote must use its public FQDN, matching the remote IP's
-# reverse DNS; this name is sent in the SMTP EHLO greeting.
+# Hostname used in protocol greetings and outbound SMTP EHLO.
 hostname: mail.example.test
 # Network for outbound MX relays: tcp (default), tcp4, or tcp6. Use tcp4 or
 # tcp6 when only that address family has correctly configured reverse DNS.
@@ -45,8 +47,6 @@ hostname: mail.example.test
 # DKIM signing for outgoing emails. When domain, private_key, public_key, and
 # selector are all configured, MyMail adds a DKIM-Signature header to outgoing
 # messages before forwarding them to destination MX hosts.
-# In split mode, configure DKIM only on the local side; it signs outbound mail
-# before sending it to the remote. Remote-only configurations must omit dkim.
 # dkim:
 #   # Domain used in DKIM signatures for outgoing email.
 #   domain: example.test
@@ -79,8 +79,8 @@ hostname: mail.example.test
 # 'ham-' prefixes for spam/ham training without requiring additional alias entries.
 users:
   user-4821@mail.example.test:
-#    password_sha256: replace-with-lowercase-sha256-hex
-    password: changeit
+    # Generate with mymail-password and provide through the daemon environment.
+    password_hash: ${MYMAIL_USER_4821_PASSWORD_HASH}
     mailbox: user-4821
     aliases:
       - alias-7f2@example.test
@@ -90,47 +90,5 @@ users:
       - barb@service.example.test   # different sub-domain
       - barb@personal.test          # completely different domain
   bob@mail.example.test:
-    password: change-me
+    password_hash: ${MYMAIL_BOB_PASSWORD_HASH}
     mailbox: bob
-# Split mode divides the daemon into two halves that communicate over a TLS
-# link.  The 'local' side runs behind the ISP firewall and serves IMAP; the
-# 'remote' side runs in cloud infrastructure and handles external SMTP
-# delivery.  Outbound mail from the local side that is not for a local mailbox
-# is sent over the TLS link to the remote side, which relays it via standard
-# SMTP.  Inbound mail received at the remote side for a local mailbox is sent
-# back over the TLS link to the local side for storage.
-# SMTP submissions connected to the remote side authenticate against users on
-# the local side. External messages are submitted to the local side for DKIM
-# signing before the remote relays them to their destination.
-#
-# The role is inferred from the configuration:
-#   - split_listen set → this instance acts as the 'remote' side (accepts
-#     connections from the local side).
-#   - split_connect set → this instance acts as the 'local' side (connects
-#     to the remote side).
-#   - Either one alone is sufficient; both can be set for full bidirectional
-#     operation.  A local-only instance (split_connect only) works normally
-#     even when the remote is unreachable, falling back to direct MX relay.
-# On connection, both sides exchange a magic number (0xABBA) to verify the
-# protocol version.  The local side then sends its complete list of mailbox
-# addresses so the remote knows which incoming recipients to forward back.
-# Only one local can be connected at a time; when the local disconnects the
-# remote clears its mailbox cache and stops accepting mail for local
-# recipients until the next connection.
-#
-# The TLS link uses stream-based multiplexing so multiple email messages can
-# be sent and received concurrently over the same connection.  Each message
-# is assigned a unique stream ID, and responses (acknowledgements or errors)
-# are matched back to the originating request by stream ID.
-#
-# The remote can optionally require the local's client certificate subject DN
-# to match a configured value for extra authentication.
-# On the local side, split_insecure_skip_verify disables verification of the
-# remote's TLS certificate. Use only when necessary: this makes the connection
-# vulnerable to man-in-the-middle attacks.
-# split_mode: "on"
-# split_listen: 0.0.0.0:1783
-# split_connect: remote.example.test:1783
-# split_ca_cert_file: /etc/mymail/split-ca.crt
-# split_insecure_skip_verify: false
-# split_local_client_dn: CN=local-mail,O=MyMail,L=Home

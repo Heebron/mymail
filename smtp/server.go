@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/tls"
+	"crypto/x509"
 	"encoding/base64"
 	"errors"
 	"fmt"
@@ -58,8 +59,14 @@ type Server struct {
 	TLSConfig *tls.Config
 	// StartTLSConfig enables STARTTLS when non-nil.
 	StartTLSConfig *tls.Config
+	// TLSAvailable, when non-nil, reports whether a certificate is currently
+	// loaded. STARTTLS is neither advertised nor accepted while it returns false.
+	TLSAvailable func() bool
 	// RequireSTARTTLS blocks authentication and MAIL until TLS is active.
 	RequireSTARTTLS bool
+	// RequireTLSForAuth blocks authentication until TLS is active, while still
+	// allowing unauthenticated inbound SMTP delivery.
+	RequireTLSForAuth bool
 	// Hostname is the name used in SMTP greetings and EHLO responses.
 	Hostname string
 	// Store receives locally delivered messages.
@@ -202,6 +209,9 @@ func (s *Server) logger() *slog.Logger {
 }
 
 func (s *Server) startTLSConfig() *tls.Config {
+	if s.TLSAvailable != nil && !s.TLSAvailable() {
+		return nil
+	}
 	return s.StartTLSConfig
 }
 
@@ -354,7 +364,7 @@ func (s *Server) handle(ctx context.Context, conn net.Conn) {
 						return
 					}
 				}
-				authReq := !s.RequireSTARTTLS || tlsActive
+				authReq := !(s.RequireSTARTTLS || s.RequireTLSForAuth) || tlsActive
 				if authReq {
 					if _, err := fmt.Fprint(writer, "250-AUTH PLAIN LOGIN\r\n"); err != nil {
 						return
@@ -390,7 +400,7 @@ func (s *Server) handle(ctx context.Context, conn net.Conn) {
 			tx = transaction{}
 			authenticated = false
 		case "AUTH":
-			if s.RequireSTARTTLS && !tlsActive {
+			if (s.RequireSTARTTLS || s.RequireTLSForAuth) && !tlsActive {
 				_ = write("530 5.7.0 Must issue STARTTLS first")
 				continue
 			}
@@ -687,10 +697,21 @@ func (s *Server) relayMX(ctx context.Context, from, recipient string, data []byt
 			lastErr = dialErr
 			continue
 		}
-		response, relayErr := relaySMTP(connection, s.Hostname, from, recipient, data)
+		response, tlsUsed, tlsVerified, relayErr := relaySMTP(connection, s.Hostname, host, from, recipient, data, true, s.logger())
 		_ = connection.Close()
+		if errors.Is(relayErr, errSMTPStartTLSHandshake) {
+			s.logger().Warn("SMTP relay STARTTLS handshake failed; retrying MX in plaintext", "domain", domain, "recipient", recipient, "mx_host", host, "message_id", messageID, "error", relayErr)
+			connection, dialErr = s.dialSMTP(ctx, net.JoinHostPort(host, "25"))
+			if dialErr != nil {
+				s.logger().Warn("SMTP forwarding plaintext retry connection failed", "domain", domain, "recipient", recipient, "mx_host", host, "message_id", messageID, "error", dialErr)
+				lastErr = dialErr
+				continue
+			}
+			response, tlsUsed, tlsVerified, relayErr = relaySMTP(connection, s.Hostname, host, from, recipient, data, false, s.logger())
+			_ = connection.Close()
+		}
 		if relayErr == nil {
-			s.logger().Info("SMTP forwarding completed", "domain", domain, "recipient", recipient, "mx_host", host, "bytes", len(data), "message_id", messageID, "response", response)
+			s.logger().Info("SMTP forwarding completed", "domain", domain, "recipient", recipient, "mx_host", host, "bytes", len(data), "message_id", messageID, "response", response, "tls", tlsUsed, "tls_verified", tlsVerified)
 			return nil
 		}
 		s.logger().Warn("SMTP forwarding attempt failed", "domain", domain, "recipient", recipient, "mx_host", host, "message_id", messageID, "error", relayErr)
@@ -723,42 +744,113 @@ type smtpResponseError struct {
 
 func (e smtpResponseError) Error() string { return fmt.Sprintf("SMTP %d %s", e.Code, e.Text) }
 
-func relaySMTP(connection net.Conn, hostname, from, recipient string, data []byte) (string, error) {
+var errSMTPStartTLSHandshake = errors.New("SMTP STARTTLS handshake failed")
+
+func relaySMTP(connection net.Conn, hostname, mxHost, from, recipient string, data []byte, allowSTARTTLS bool, logger *slog.Logger) (string, bool, bool, error) {
 	reader := bufio.NewReaderSize(connection, 16*1024)
 	writer := bufio.NewWriterSize(connection, 16*1024)
 	if _, err := readSMTPResponse(reader, 220); err != nil {
-		return "", err
+		return "", false, false, err
 	}
-	if err := sendSMTPCommand(reader, writer, 250, "EHLO %s", hostname); err != nil {
-		if response, ok := err.(smtpResponseError); !ok || response.Code < 500 || response.Code >= 600 {
-			return "", err
+	capabilities, err := sendSMTPHello(reader, writer, hostname)
+	if err != nil {
+		return "", false, false, err
+	}
+	tlsUsed := false
+	tlsVerified := false
+	if allowSTARTTLS && hasSMTPCapability(capabilities, "STARTTLS") {
+		if err := sendSMTPCommand(reader, writer, 220, "STARTTLS"); err != nil {
+			return "", false, false, err
 		}
-		if err := sendSMTPCommand(reader, writer, 250, "HELO %s", hostname); err != nil {
-			return "", err
+		tlsConnection := tls.Client(connection, &tls.Config{
+			ServerName:         strings.TrimSuffix(strings.TrimSpace(mxHost), "."),
+			InsecureSkipVerify: true,
+		})
+		if err := tlsConnection.Handshake(); err != nil {
+			return "", false, false, fmt.Errorf("%w: %v", errSMTPStartTLSHandshake, err)
+		}
+		tlsUsed = true
+		if err := verifySMTPServerCertificate(tlsConnection.ConnectionState(), mxHost); err != nil {
+			if logger != nil {
+				logger.Warn("SMTP relay TLS certificate verification failed", "mx_host", mxHost, "error", err)
+			}
+		} else {
+			tlsVerified = true
+		}
+		connection = tlsConnection
+		reader = bufio.NewReaderSize(connection, 16*1024)
+		writer = bufio.NewWriterSize(connection, 16*1024)
+		capabilities, err = sendSMTPHello(reader, writer, hostname)
+		if err != nil {
+			return "", tlsUsed, tlsVerified, err
 		}
 	}
 	if err := sendSMTPCommand(reader, writer, 250, "MAIL FROM:<%s>", from); err != nil {
-		return "", err
+		return "", tlsUsed, tlsVerified, err
 	}
 	if err := sendSMTPCommand(reader, writer, 250, "RCPT TO:<%s>", recipient); err != nil {
-		return "", err
+		return "", tlsUsed, tlsVerified, err
 	}
 	if err := sendSMTPCommand(reader, writer, 354, "DATA"); err != nil {
-		return "", err
+		return "", tlsUsed, tlsVerified, err
 	}
 	if err := writeSMTPData(writer, data); err != nil {
-		return "", err
+		return "", tlsUsed, tlsVerified, err
 	}
 	if err := writer.Flush(); err != nil {
-		return "", err
+		return "", tlsUsed, tlsVerified, err
 	}
 	response, err := readSMTPResponse(reader, 250)
 	if err != nil {
-		return "", err
+		return "", tlsUsed, tlsVerified, err
 	}
 	_, _ = fmt.Fprint(writer, "QUIT\r\n")
 	_ = writer.Flush()
-	return "250 " + strings.TrimSpace(response), nil
+	return "250 " + strings.TrimSpace(response), tlsUsed, tlsVerified, nil
+}
+
+func sendSMTPHello(reader *bufio.Reader, writer *bufio.Writer, hostname string) ([]string, error) {
+	lines, err := sendSMTPCommandLines(reader, writer, 250, "EHLO %s", hostname)
+	if err == nil {
+		return lines, nil
+	}
+	response, ok := err.(smtpResponseError)
+	if !ok || response.Code < 500 || response.Code >= 600 {
+		return nil, err
+	}
+	if err := sendSMTPCommand(reader, writer, 250, "HELO %s", hostname); err != nil {
+		return nil, err
+	}
+	return nil, nil
+}
+
+func hasSMTPCapability(lines []string, capability string) bool {
+	for _, line := range lines {
+		if len(line) < 4 {
+			continue
+		}
+		fields := strings.Fields(line[4:])
+		if len(fields) > 0 && strings.EqualFold(fields[0], capability) {
+			return true
+		}
+	}
+	return false
+}
+
+func verifySMTPServerCertificate(state tls.ConnectionState, serverName string) error {
+	if len(state.PeerCertificates) == 0 {
+		return errors.New("SMTP relay did not present a certificate")
+	}
+	intermediates := x509.NewCertPool()
+	for _, certificate := range state.PeerCertificates[1:] {
+		intermediates.AddCert(certificate)
+	}
+	_, err := state.PeerCertificates[0].Verify(x509.VerifyOptions{
+		DNSName:       strings.TrimSuffix(strings.TrimSpace(serverName), "."),
+		Intermediates: intermediates,
+		KeyUsages:     []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+	})
+	return err
 }
 
 func sendSMTPCommand(reader *bufio.Reader, writer *bufio.Writer, expected int, format string, args ...any) error {
@@ -772,20 +864,46 @@ func sendSMTPCommand(reader *bufio.Reader, writer *bufio.Writer, expected int, f
 	return err
 }
 
+func sendSMTPCommandLines(reader *bufio.Reader, writer *bufio.Writer, expected int, format string, args ...any) ([]string, error) {
+	if _, err := fmt.Fprintf(writer, format+"\r\n", args...); err != nil {
+		return nil, err
+	}
+	if err := writer.Flush(); err != nil {
+		return nil, err
+	}
+	return readSMTPResponseLines(reader, expected)
+}
+
 func readSMTPResponse(reader *bufio.Reader, expected int) (string, error) {
+	lines, err := readSMTPResponseLines(reader, expected)
+	if err != nil {
+		return "", err
+	}
+	parts := make([]string, 0, len(lines))
+	for _, line := range lines {
+		if len(line) > 4 {
+			parts = append(parts, line[4:])
+		}
+	}
+	return strings.Join(parts, " "), nil
+}
+
+func readSMTPResponseLines(reader *bufio.Reader, expected int) ([]string, error) {
 	var text strings.Builder
+	var lines []string
 	for {
 		line, err := reader.ReadString('\n')
 		if err != nil {
-			return "", err
+			return nil, err
 		}
 		line = strings.TrimRight(line, "\r\n")
+		lines = append(lines, line)
 		if len(line) < 3 {
-			return "", errors.New("malformed SMTP response")
+			return nil, errors.New("malformed SMTP response")
 		}
 		code, parseErr := strconv.Atoi(line[:3])
 		if parseErr != nil {
-			return "", errors.New("malformed SMTP response code")
+			return nil, errors.New("malformed SMTP response code")
 		}
 		if text.Len() > 0 {
 			text.WriteByte(' ')
@@ -795,9 +913,9 @@ func readSMTPResponse(reader *bufio.Reader, expected int) (string, error) {
 		}
 		if len(line) < 4 || line[3] != '-' {
 			if code != expected {
-				return "", smtpResponseError{Code: code, Text: text.String()}
+				return nil, smtpResponseError{Code: code, Text: text.String()}
 			}
-			return text.String(), nil
+			return lines, nil
 		}
 	}
 }

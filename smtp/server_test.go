@@ -20,6 +20,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -1334,6 +1335,76 @@ func TestSMTPRejectsUnknownUserOnLocalDomain(t *testing.T) {
 }
 
 func TestSMTPStartTLS(t *testing.T) {
+	runSMTPStartTLSTest(t, true, false, "530 ")
+}
+
+func TestSMTPAuthRequiresTLSAndAllowsInboundMail(t *testing.T) {
+	runSMTPStartTLSTest(t, false, true, "250 ")
+}
+
+func TestSMTPStartTLSHiddenUntilCertificateAvailable(t *testing.T) {
+	store, err := maildir.New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var available atomic.Bool
+	server := &Server{
+		Hostname:          "mail.example.test",
+		StartTLSConfig:    testTLSConfig(t),
+		TLSAvailable:      available.Load,
+		RequireTLSForAuth: true,
+		Store:             store,
+		Resolve:           func(string) (string, bool) { return "", false },
+		Logger:            slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}
+	serverConn, clientConn := net.Pipe()
+	defer clientConn.Close()
+	go server.handle(context.Background(), serverConn)
+
+	reader := bufio.NewReader(clientConn)
+	readLine := func() string {
+		t.Helper()
+		line, readErr := reader.ReadString('\n')
+		if readErr != nil {
+			t.Fatal(readErr)
+		}
+		return strings.TrimRight(line, "\r\n")
+	}
+	writeLine := func(line string) {
+		t.Helper()
+		if _, writeErr := io.WriteString(clientConn, line+"\r\n"); writeErr != nil {
+			t.Fatal(writeErr)
+		}
+	}
+	ehlo := func() []string {
+		t.Helper()
+		writeLine("EHLO localhost")
+		capabilities := make([]string, 0, 6)
+		for len(capabilities) == 0 || strings.HasPrefix(capabilities[len(capabilities)-1], "250-") {
+			capabilities = append(capabilities, readLine())
+		}
+		return capabilities
+	}
+
+	if greeting := readLine(); !strings.HasPrefix(greeting, "220 ") {
+		t.Fatalf("greeting = %q", greeting)
+	}
+	if capabilities := ehlo(); containsLine(capabilities, "250-STARTTLS") {
+		t.Fatalf("STARTTLS advertised without a certificate: %#v", capabilities)
+	}
+	writeLine("STARTTLS")
+	if response := readLine(); !strings.HasPrefix(response, "454 ") {
+		t.Fatalf("STARTTLS without a certificate response = %q, want 454", response)
+	}
+
+	available.Store(true)
+	if capabilities := ehlo(); !containsLine(capabilities, "250-STARTTLS") {
+		t.Fatalf("STARTTLS not advertised after a certificate became available: %#v", capabilities)
+	}
+}
+
+func runSMTPStartTLSTest(t *testing.T, requireSTARTTLS, requireTLSForAuth bool, plaintextMailPrefix string) {
+	t.Helper()
 	testUsername := os.Getenv("MYMAIL_TEST_USERNAME")
 	if testUsername == "" {
 		t.Fatal("MYMAIL_TEST_USERNAME must be set before running tests")
@@ -1343,11 +1414,12 @@ func TestSMTPStartTLS(t *testing.T) {
 		t.Fatal(err)
 	}
 	server := &Server{
-		Hostname:        "mail.example.test",
-		StartTLSConfig:  testTLSConfig(t),
-		RequireSTARTTLS: true,
-		Store:           store,
-		Resolve:         func(string) (string, bool) { return "", false },
+		Hostname:          "mail.example.test",
+		StartTLSConfig:    testTLSConfig(t),
+		RequireSTARTTLS:   requireSTARTTLS,
+		RequireTLSForAuth: requireTLSForAuth,
+		Store:             store,
+		Resolve:           func(string) (string, bool) { return "", false },
 		Authenticate: func(username, password string) bool {
 			return username == testUsername && password == "changeit"
 		},
@@ -1392,8 +1464,8 @@ func TestSMTPStartTLS(t *testing.T) {
 		t.Fatalf("plaintext AUTH response = %q", response)
 	}
 	writeLine("MAIL FROM:<sender@example.test>")
-	if response := readLine(); !strings.HasPrefix(response, "530 ") {
-		t.Fatalf("plaintext MAIL response = %q", response)
+	if response := readLine(); !strings.HasPrefix(response, plaintextMailPrefix) {
+		t.Fatalf("plaintext MAIL response = %q, want prefix %q", response, plaintextMailPrefix)
 	}
 	writeLine("STARTTLS")
 	if response := readLine(); !strings.HasPrefix(response, "220 ") {
@@ -1718,6 +1790,150 @@ func TestSMTPSpamdTrainingDelivery(t *testing.T) {
 	if !strings.Contains(deliveredText, "DidSet: local") {
 		t.Fatalf("delivered message missing DidSet header info: %s", deliveredText)
 	}
+}
+
+func TestRelayMXUsesSTARTTLSWhenAdvertised(t *testing.T) {
+	serverConfig := testTLSConfig(t)
+	server := &Server{
+		Hostname: "mail.example.test",
+		LookupMX: func(context.Context, string) ([]*net.MX, error) {
+			return []*net.MX{{Host: "mx.remote.test."}}, nil
+		},
+		DialSMTP: func(context.Context, string) (net.Conn, error) {
+			client, peer := net.Pipe()
+			go func() { _ = serveRelayTestPeer(peer, serverConfig, true, true, false) }()
+			return client, nil
+		},
+		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}
+	if err := server.relayMX(context.Background(), "sender@example.test", "recipient@remote.test", []byte("Subject: test\r\n\r\nbody\r\n")); err != nil {
+		t.Fatalf("relayMX() error = %v", err)
+	}
+}
+
+func TestRelayMXRetriesPlaintextAfterSTARTTLSHandshakeFailure(t *testing.T) {
+	var dialCount int
+	peerErrors := make(chan error, 2)
+	server := &Server{
+		Hostname: "mail.example.test",
+		LookupMX: func(context.Context, string) ([]*net.MX, error) {
+			return []*net.MX{{Host: "mx.remote.test."}}, nil
+		},
+		DialSMTP: func(context.Context, string) (net.Conn, error) {
+			dialCount++
+			client, peer := net.Pipe()
+			attempt := dialCount
+			go func() {
+				peerErrors <- serveRelayTestPeer(peer, nil, true, false, attempt == 1)
+			}()
+			return client, nil
+		},
+		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}
+	if err := server.relayMX(context.Background(), "sender@example.test", "recipient@remote.test", []byte("Subject: test\r\n\r\nbody\r\n")); err != nil {
+		t.Fatalf("relayMX() error = %v", err)
+	}
+	if dialCount != 2 {
+		t.Fatalf("SMTP dial count = %d, want initial connection plus one plaintext retry", dialCount)
+	}
+	for i := 0; i < 2; i++ {
+		if err := <-peerErrors; err != nil {
+			t.Errorf("mock MX attempt %d: %v", i+1, err)
+		}
+	}
+}
+
+func serveRelayTestPeer(connection net.Conn, serverConfig *tls.Config, advertiseSTARTTLS, acceptTLS, abortHandshake bool) error {
+	defer connection.Close()
+	if err := connection.SetDeadline(time.Now().Add(5 * time.Second)); err != nil {
+		return err
+	}
+	reader := bufio.NewReader(connection)
+	write := func(line string) error {
+		_, err := io.WriteString(connection, line+"\r\n")
+		return err
+	}
+	read := func(want string) error {
+		line, err := reader.ReadString('\n')
+		if err != nil {
+			return err
+		}
+		if got := strings.TrimRight(line, "\r\n"); got != want {
+			return fmt.Errorf("SMTP command = %q, want %q", got, want)
+		}
+		return nil
+	}
+	if err := write("220 mx.remote.test ESMTP"); err != nil {
+		return err
+	}
+	if err := read("EHLO mail.example.test"); err != nil {
+		return err
+	}
+	if advertiseSTARTTLS {
+		if err := write("250-mx.remote.test"); err != nil {
+			return err
+		}
+		if err := write("250-STARTTLS"); err != nil {
+			return err
+		}
+		if err := write("250 SIZE 52428800"); err != nil {
+			return err
+		}
+	} else if err := write("250 mx.remote.test"); err != nil {
+		return err
+	}
+	if acceptTLS || abortHandshake {
+		if err := read("STARTTLS"); err != nil {
+			return err
+		}
+		if err := write("220 Ready to start TLS"); err != nil {
+			return err
+		}
+		if abortHandshake {
+			return nil
+		}
+		tlsConnection := tls.Server(connection, serverConfig)
+		if err := tlsConnection.Handshake(); err != nil {
+			return err
+		}
+		connection = tlsConnection
+		reader = bufio.NewReader(connection)
+		write = func(line string) error {
+			_, err := io.WriteString(connection, line+"\r\n")
+			return err
+		}
+		if err := read("EHLO mail.example.test"); err != nil {
+			return err
+		}
+		if err := write("250-mx.remote.test"); err != nil {
+			return err
+		}
+		if err := write("250 SIZE 52428800"); err != nil {
+			return err
+		}
+	}
+	for _, exchange := range []struct{ command, response string }{
+		{"MAIL FROM:<sender@example.test>", "250 sender ok"},
+		{"RCPT TO:<recipient@remote.test>", "250 recipient ok"},
+		{"DATA", "354 continue"},
+	} {
+		if err := read(exchange.command); err != nil {
+			return err
+		}
+		if err := write(exchange.response); err != nil {
+			return err
+		}
+	}
+	for {
+		line, err := reader.ReadString('\n')
+		if err != nil {
+			return err
+		}
+		if line == ".\r\n" {
+			break
+		}
+	}
+	return write("250 2.0.0 queued")
 }
 
 func containsLine(lines []string, want string) bool {

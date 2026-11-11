@@ -13,8 +13,15 @@ this as my IMAP and SMTP production capability.
 
 - [Configuration and local operation](config.example.yaml) — complete example
   with listener, TLS, authentication, and mailbox settings.
+- [Split deployment examples](config-split-local.yaml) ([remote config](config-split-remote.yaml)) —
+  separate, role-specific configurations for the local mailbox server and
+  public SMTP relay.
 - [Public Internet deployment](INTERNET_DEPLOYMENT.md) — DNS, TLS, firewall,
   sender authentication, and delivery guidance.
+- [Security notes](SECURITY.md) — implemented hardening, operator actions, and
+  known limitations.
+- [`mymail-password` guide](CMD_MYMAIL-PASSWORD.md) — generate bcrypt hashes
+  without putting plaintext passwords in command arguments.
 - [Contributing](CONTRIBUTING.md) — development workflow and review standards.
 - Go package comments — API behavior and extension points for `auth`, `config`,
   `dkim`, `health`, `imap`, `logging`, `maildir`, `plugins`, and `smtp`.
@@ -60,7 +67,8 @@ this as my IMAP and SMTP production capability.
   by source IP and account. Failed-authentication responses are delayed by at
   most one second by default, and a successful login clears the associated IP
   and account backoff state.
-- Per-user mailbox resolution and password or SHA-256 password authentication.
+- Per-user mailbox resolution with bcrypt password hashes and backward-compatible
+  cleartext or SHA-256 authentication.
 - YAML configuration with sensible development defaults.
 
 ## Build and deploy
@@ -131,9 +139,10 @@ The daemon exits after all listener goroutines have stopped. A supervisor may
 forcibly terminate it if its configured stop timeout expires before this
 sequence completes.
 
-The default listeners are cleartext SMTP `:25`, SMTP submission `:587` (always
-requiring `STARTTLS`), optional implicit-TLS SMTP submission `:465`, and IMAP
-`:1143`.
+The default listeners are inbound SMTP `:25` (accepts ordinary MX mail without
+TLS and makes `AUTH` available only after `STARTTLS`), SMTP submission `:587`
+(always requiring `STARTTLS`), optional implicit-TLS SMTP submission `:465`,
+and IMAP `:1143`.
 Use a reverse proxy, firewall rules, or privileged socket activation when
 exposing standard ports. Set `tls_cert_file` and `tls_key_file` to enable
 `STARTTLS` on `smtp_listen` and `imap_listen`, and to enable implicit TLS on
@@ -141,7 +150,9 @@ exposing standard ports. Set `tls_cert_file` and `tls_key_file` to enable
 configured with `smtp_cleartext_listen`.
 The checked-in `config.example.yaml` demonstrates STARTTLS with certificate
 paths under `/etc/mymail`; install those files before starting the service,
-because the SMTP submission listener requires a certificate and key.
+because the SMTP listeners require a certificate and key. For split deployments,
+use the separate [`config-split-local.yaml`](config-split-local.yaml) and
+[`config-split-remote.yaml`](config-split-remote.yaml) examples.
 
 ### Kubernetes
 
@@ -233,7 +244,7 @@ example:
 ```yaml
 users:
   user-4821@mail.example.test:
-    password: changeit
+    password_hash: ${MYMAIL_USER_4821_PASSWORD_HASH}
     mailbox: user-4821
     aliases:
       - alias-7f2@example.test
@@ -242,29 +253,64 @@ users:
 ```
 
 Alias domains are treated as configured local domains, so unknown recipients
-at those domains are rejected rather than forwarded. Prefer `password_sha256`
-for a configuration file rather than
-plaintext `password` values, and restrict the file to the service account.
+at those domains are rejected rather than forwarded. For new deployments, use
+`password_hash` with a bcrypt hash, supplied through a protected environment
+variable, and restrict the configuration file to the service account. Legacy
+`password` and `password_sha256` values remain supported but should be migrated.
+
+When `split_mode: on` and `split_listen` is configured, `split_ca_cert_file` is
+required to authenticate the connecting split peer's client certificate. Use a
+CA that signs the local side's certificate; configure the same CA on the local
+side when it is needed to verify a privately signed remote certificate.
+Configure `split_tls_cert_file` and `split_tls_key_file` to use a dedicated
+certificate pair on the split link; otherwise MyMail reuses `tls_cert_file` and
+`tls_key_file`. The split pair acts as a client certificate on a local instance
+and a server certificate on a remote instance, so a bidirectional instance
+needs both EKUs or no EKU restriction.
+In a remote-only split deployment (`split_listen` without `split_connect`), do
+not configure `users` on the remote: the local publishes mailbox addresses and
+aliases for routing and checks SMTP authentication requests over the split
+link. When the local disconnects, the remote clears the published address list
+and cannot authenticate local users until it reconnects.
+See the [`config-split-local.yaml`](config-split-local.yaml) and
+[`config-split-remote.yaml`](config-split-remote.yaml) files for documented
+role-specific examples.
+On the local side, `split_ignore_server_name: true` skips only the remote
+certificate's hostname check while retaining CA-chain verification; use it
+when connecting by IP, and preferably pair it with a private `split_ca_cert_file`.
+A remote-only instance does not need `tls_cert_file` or `tls_key_file`: each
+time the local connects, it reads its own `tls_cert_file` and `tls_key_file` and
+sends them over the verified split link, and the remote serves that certificate
+on its SMTP listeners. Certificates are therefore renewed only on the local and
+reach the remote on the next reconnect. The remote still needs its own
+`split_tls_cert_file` and `split_tls_key_file` for the split listener, because
+that certificate is required before the link exists; issue it from your private
+split CA and set `split_ca_cert_file` to that CA on the local. The local does not
+send its key when `split_insecure_skip_verify` is enabled. A `tls_cert_file`
+configured on the remote is served until the local's certificate arrives.
 ### `mymail-password`
 
-`mymail-password` generates the lowercase SHA-256 hexadecimal value used by
-`password_sha256`. Build it with:
+`mymail-password` reads a password from standard input and prints a bcrypt hash
+for the user's `password_hash` field. Build it with:
 
 ```sh
 go build -o mymail-password ./cmd/mymail-password
-printf '%s\n' 'changeit' | ./mymail-password
 ```
 
-The command reads a password from standard input by default and prints the
-hash to standard output. It also accepts the password as a positional argument
-for convenience, although standard input avoids exposing the password in shell
-history:
+Read the password without echoing it, then pipe it to the tool; this keeps the
+plaintext out of the command history and process arguments:
 
 ```sh
-./mymail-password 'changeit'
+read -s -r -p 'Password: ' MYMAIL_PASSWORD
+printf '\n'
+export MYMAIL_USER_PASSWORD_HASH="$(printf '%s\n' "$MYMAIL_PASSWORD" | ./mymail-password)"
+unset MYMAIL_PASSWORD
 ```
 
-Place the resulting hash in the user's `password_sha256` configuration value.
+Set `MYMAIL_USER_PASSWORD_HASH` in the daemon's environment and reference it as
+`password_hash: ${MYMAIL_USER_PASSWORD_HASH}`. Positional password arguments
+are rejected, passwords must be 1–72 bytes, and the bcrypt cost defaults to
+`bcrypt.DefaultCost`; use `-cost` to override it when required.
 
 ### `mymail-dkim`
 

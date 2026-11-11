@@ -3,7 +3,9 @@ package config
 import (
 	"crypto/rand"
 	"crypto/rsa"
+	"crypto/sha256"
 	"crypto/x509"
+	"encoding/hex"
 	"encoding/pem"
 	"fmt"
 	"os"
@@ -11,9 +13,13 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"golang.org/x/crypto/bcrypt"
 )
 
 func TestLoadYAML(t *testing.T) {
+	t.Setenv("MYMAIL_SPLIT_CERT", "/etc/mymail/split.crt")
+	t.Setenv("MYMAIL_SPLIT_KEY", "/etc/mymail/split.key")
 	path := filepath.Join(t.TempDir(), "config.yaml")
 	contents := []byte(`smtp_listen: 127.0.0.1:2525
 smtp_cleartext_listen: 127.0.0.1:25
@@ -23,6 +29,8 @@ imap_tls_listen: 127.0.0.1:1993
 imap_require_starttls: true
 tls_cert_file: /etc/mymail/tls.crt
 tls_key_file: /etc/mymail/tls.key
+split_tls_cert_file: ${MYMAIL_SPLIT_CERT}
+split_tls_key_file: ${MYMAIL_SPLIT_KEY}
 auth_throttle:
   max_attempts_per_connection: 7
   max_failures_per_ip: 23
@@ -64,6 +72,9 @@ users:
 	if got.TLSCertFile != "/etc/mymail/tls.crt" || got.TLSKeyFile != "/etc/mymail/tls.key" {
 		t.Fatalf("TLS certificate files = %#v", got)
 	}
+	if got.SplitTLSCertFile != "/etc/mymail/split.crt" || got.SplitTLSKeyFile != "/etc/mymail/split.key" {
+		t.Fatalf("split TLS certificate files = %q, %q", got.SplitTLSCertFile, got.SplitTLSKeyFile)
+	}
 	if got.AuthThrottle.MaxAttemptsPerConnection != 7 || got.AuthThrottle.MaxFailuresPerIP != 23 || got.AuthThrottle.MaxFailuresPerAccount != 11 || got.AuthThrottle.BackoffBase != 2*time.Second || got.AuthThrottle.BackoffMax != 90*time.Second || got.AuthThrottle.ResponseDelayMax != 3*time.Second || got.AuthThrottle.FailureWindow != 20*time.Minute {
 		t.Fatalf("authentication throttling = %#v", got.AuthThrottle)
 	}
@@ -90,6 +101,138 @@ users:
 	}
 }
 
+func TestExampleConfigLoadsWithPasswordHashEnvironment(t *testing.T) {
+	firstHash, err := bcrypt.GenerateFromPassword([]byte("alice-secret"), bcrypt.MinCost)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondHash, err := bcrypt.GenerateFromPassword([]byte("bob-secret"), bcrypt.MinCost)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("MYMAIL_USER_4821_PASSWORD_HASH", string(firstHash))
+	t.Setenv("MYMAIL_BOB_PASSWORD_HASH", string(secondHash))
+
+	cfg, err := Load(filepath.Join("..", "config.example.yaml"))
+	if err != nil {
+		t.Fatalf("Load(config.example.yaml) = %v", err)
+	}
+	if cfg.Users["user-4821@mail.example.test"].PasswordHash != string(firstHash) {
+		t.Fatal("example config did not expand the user-4821 bcrypt hash")
+	}
+	if cfg.Users["bob@mail.example.test"].PasswordHash != string(secondHash) {
+		t.Fatal("example config did not expand the bob bcrypt hash")
+	}
+}
+
+func TestSplitExampleConfigsLoad(t *testing.T) {
+	passwordHash, err := bcrypt.GenerateFromPassword([]byte("split-example-secret"), bcrypt.MinCost)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("MYMAIL_USER_PASSWORD_HASH", string(passwordHash))
+
+	local, err := Load(filepath.Join("..", "config-split-local.yaml"))
+	if err != nil {
+		t.Fatalf("Load(config-split-local.yaml) = %v", err)
+	}
+	if !local.IsSplitLocal() || local.IsSplitRemote() {
+		t.Fatalf("local split roles = local:%t remote:%t, want local only", local.IsSplitLocal(), local.IsSplitRemote())
+	}
+	if local.SplitConnect == "" || !local.SplitIgnoreServerName || local.SplitTLSCertFile == "" || local.SplitTLSKeyFile == "" {
+		t.Fatalf("local split settings are incomplete: %#v", local)
+	}
+	if len(local.Users) == 0 || local.Users["user@example.test"].PasswordHash != string(passwordHash) {
+		t.Fatalf("local example user/password hash not loaded: %#v", local.Users)
+	}
+	if local.TLSCertFile == "" || local.TLSKeyFile == "" || local.SplitCACertFile == "" {
+		t.Fatalf("local example must configure the public TLS pair and the split CA: %#v", local)
+	}
+
+	remote, err := Load(filepath.Join("..", "config-split-remote.yaml"))
+	if err != nil {
+		t.Fatalf("Load(config-split-remote.yaml) = %v", err)
+	}
+	if !remote.IsSplitRemote() || remote.IsSplitLocal() {
+		t.Fatalf("remote split roles = local:%t remote:%t, want remote only", remote.IsSplitLocal(), remote.IsSplitRemote())
+	}
+	if remote.SplitCACertFile == "" {
+		t.Fatal("remote example has no split_ca_cert_file")
+	}
+	if len(remote.Users) != 0 {
+		t.Fatalf("remote example must not configure users, got %#v", remote.Users)
+	}
+	if remote.TLSCertFile != "" || remote.TLSKeyFile != "" {
+		t.Fatalf("remote example should receive its SMTP certificate from the local, got tls_cert_file=%q tls_key_file=%q", remote.TLSCertFile, remote.TLSKeyFile)
+	}
+	if remote.SplitTLSCertFile == "" || remote.SplitTLSKeyFile == "" {
+		t.Fatal("remote example has no split_tls_cert_file/split_tls_key_file for its split listener")
+	}
+}
+
+func TestValidateRemoteOnlyDoesNotRequirePublicTLSCertificate(t *testing.T) {
+	remote := func() Config {
+		return Config{
+			SMTPListen:       "0.0.0.0:587",
+			SMTPTLSListen:    "0.0.0.0:465",
+			Hostname:         "smtp.remote.example.test",
+			SplitMode:        "on",
+			SplitListen:      "0.0.0.0:1783",
+			SplitCACertFile:  "split-ca.crt",
+			SplitTLSCertFile: "split-server.crt",
+			SplitTLSKeyFile:  "split-server.key",
+		}
+	}
+
+	cfg := remote()
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate() remote without tls_cert_file error = %v, want success", err)
+	}
+
+	cfg = remote()
+	cfg.TLSCertFile = "tls.crt"
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "tls_cert_file and tls_key_file must be configured together") {
+		t.Fatalf("Validate() remote with tls_cert_file only error = %v, want pairing error", err)
+	}
+
+	cfg = remote()
+	cfg.SplitTLSCertFile = ""
+	cfg.SplitTLSKeyFile = ""
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "split_tls_cert_file") {
+		t.Fatalf("Validate() remote without any certificate error = %v, want split certificate requirement", err)
+	}
+}
+
+func TestValidateSplitLocalStillRequiresPublicTLSCertificate(t *testing.T) {
+	cfg := Config{
+		SMTPListen:       "0.0.0.0:587",
+		IMAPListen:       "0.0.0.0:143",
+		MaildirRoot:      t.TempDir(),
+		Hostname:         "mail.example.test",
+		SplitMode:        "on",
+		SplitConnect:     "remote.example.test:1783",
+		SplitTLSCertFile: "split-client.crt",
+		SplitTLSKeyFile:  "split-client.key",
+		Users:            map[string]User{"user@example.test": {Password: "example-password"}},
+	}
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "smtp_listen requires tls_cert_file and tls_key_file") {
+		t.Fatalf("Validate() local without tls_cert_file error = %v, want TLS requirement", err)
+	}
+}
+
+func TestValidateRemoteRoleRejectsConfiguredUsers(t *testing.T) {
+	remote, err := Load(filepath.Join("..", "config-split-remote.yaml"))
+	if err != nil {
+		t.Fatalf("Load(config-split-remote.yaml) = %v", err)
+	}
+	remote.Users["user@example.test"] = User{Password: "example-password", Mailbox: "user"}
+
+	err = remote.Validate()
+	if err == nil || !strings.Contains(err.Error(), "remote role should not define users") {
+		t.Fatalf("Validate() error = %v, want remote users rejection", err)
+	}
+}
+
 func TestValidateSplitConfigInsecureSkipVerifyRequiresConnect(t *testing.T) {
 	cfg := Config{
 		SplitListen:             "127.0.0.1:1783",
@@ -101,10 +244,146 @@ func TestValidateSplitConfigInsecureSkipVerifyRequiresConnect(t *testing.T) {
 	}
 }
 
+func TestValidateSplitConfigIgnoreServerNameRequiresConnect(t *testing.T) {
+	cfg := Config{SplitIgnoreServerName: true}
+	if err := validateSplitConfig(&cfg); err == nil || !strings.Contains(err.Error(), "split_ignore_server_name requires split_connect") {
+		t.Fatalf("validateSplitConfig() error = %v, want split_connect requirement", err)
+	}
+
+	cfg.SplitConnect = "remote.example.test:1783"
+	cfg.TLSCertFile = "tls.crt"
+	cfg.TLSKeyFile = "tls.key"
+	if err := validateSplitConfig(&cfg); err != nil {
+		t.Fatalf("validateSplitConfig() with split_connect error = %v, want success", err)
+	}
+}
+
+func TestSplitCertificateFilesUsesConfiguredPairOrMainPair(t *testing.T) {
+	cfg := Config{TLSCertFile: "main.crt", TLSKeyFile: "main.key"}
+	if certFile, keyFile := cfg.SplitCertificateFiles(); certFile != "main.crt" || keyFile != "main.key" {
+		t.Fatalf("SplitCertificateFiles() fallback = %q, %q, want main TLS pair", certFile, keyFile)
+	}
+
+	cfg.SplitTLSCertFile = "split.crt"
+	cfg.SplitTLSKeyFile = "split.key"
+	if certFile, keyFile := cfg.SplitCertificateFiles(); certFile != "split.crt" || keyFile != "split.key" {
+		t.Fatalf("SplitCertificateFiles() configured = %q, %q, want split TLS pair", certFile, keyFile)
+	}
+}
+
+func TestValidateSplitConfigSplitTLSCertificatePair(t *testing.T) {
+	cfg := Config{SplitConnect: "remote.example.test:1783"}
+	if err := validateSplitConfig(&cfg); err == nil || !strings.Contains(err.Error(), "split mode requires split_tls_cert_file and split_tls_key_file, or tls_cert_file and tls_key_file") {
+		t.Fatalf("validateSplitConfig() error = %v, want split TLS certificate requirement", err)
+	}
+
+	cfg = Config{
+		SplitConnect:     "remote.example.test:1783",
+		TLSCertFile:      "tls.crt",
+		TLSKeyFile:       "tls.key",
+		SplitTLSCertFile: "split.crt",
+	}
+	if err := validateSplitConfig(&cfg); err == nil || !strings.Contains(err.Error(), "split_tls_cert_file and split_tls_key_file must be configured together") {
+		t.Fatalf("validateSplitConfig() error = %v, want paired split certificate requirement", err)
+	}
+
+	cfg.SplitTLSCertFile = ""
+	cfg.SplitTLSKeyFile = "split.key"
+	if err := validateSplitConfig(&cfg); err == nil || !strings.Contains(err.Error(), "split_tls_cert_file and split_tls_key_file must be configured together") {
+		t.Fatalf("validateSplitConfig() error = %v, want paired split key requirement", err)
+	}
+
+	cfg.SplitTLSCertFile = "split.crt"
+	if err := validateSplitConfig(&cfg); err != nil {
+		t.Fatalf("validateSplitConfig() with main and split pairs error = %v, want success", err)
+	}
+
+	cfg.TLSCertFile = ""
+	cfg.TLSKeyFile = ""
+	if err := validateSplitConfig(&cfg); err != nil {
+		t.Fatalf("validateSplitConfig() with split pair only error = %v, want success", err)
+	}
+}
+
+func TestValidateSplitListenerRequiresCACert(t *testing.T) {
+	cfg := Config{
+		SplitListen: "127.0.0.1:1783",
+		TLSCertFile: "tls.crt",
+		TLSKeyFile:  "tls.key",
+	}
+	if err := validateSplitConfig(&cfg); err == nil || !strings.Contains(err.Error(), "split_ca_cert_file") {
+		t.Fatalf("validateSplitConfig() error = %v, want split_ca_cert_file requirement", err)
+	}
+
+	cfg.SplitCACertFile = "split-ca.crt"
+	if err := validateSplitConfig(&cfg); err != nil {
+		t.Fatalf("validateSplitConfig() with CA error = %v, want success", err)
+	}
+}
+
+func TestPasswordHashAuthenticatesAndValidationChecks(t *testing.T) {
+	hash, err := bcrypt.GenerateFromPassword([]byte("correct horse"), bcrypt.MinCost)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := Defaults()
+	cfg.Hostname = "smtp.example.test"
+	cfg.TLSCertFile = "tls.crt"
+	cfg.TLSKeyFile = "tls.key"
+	cfg.MaildirRoot = t.TempDir()
+	cfg.Users = map[string]User{"alice@example.test": {PasswordHash: string(hash)}}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate() with valid bcrypt hash = %v", err)
+	}
+	if !cfg.Authenticate("alice@example.test", "correct horse") {
+		t.Fatal("Authenticate() rejected the correct bcrypt password")
+	}
+	if cfg.Authenticate("alice@example.test", "wrong horse") {
+		t.Fatal("Authenticate() accepted an incorrect bcrypt password")
+	}
+
+	cfg.Users["alice@example.test"] = User{PasswordHash: "not-a-bcrypt-hash"}
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "invalid bcrypt password_hash") {
+		t.Fatalf("Validate() with malformed bcrypt hash = %v, want invalid hash error", err)
+	}
+}
+
+func TestPasswordHashEnvironmentExpansion(t *testing.T) {
+	hash, err := bcrypt.GenerateFromPassword([]byte("secret"), bcrypt.MinCost)
+	if err != nil {
+		t.Fatal(err)
+	}
+	literal := string(hash)
+	t.Setenv("MYMAIL_TEST_PASSWORD_HASH", literal)
+
+	cfg := Config{Users: map[string]User{
+		"literal@example.test":  {PasswordHash: literal},
+		"expanded@example.test": {PasswordHash: "${MYMAIL_TEST_PASSWORD_HASH}"},
+	}}
+	cfg.expandEnvironment()
+	if got := cfg.Users["literal@example.test"].PasswordHash; got != literal {
+		t.Fatalf("literal bcrypt hash expanded to %q, want unchanged hash", got)
+	}
+	if got := cfg.Users["expanded@example.test"].PasswordHash; got != literal {
+		t.Fatalf("environment bcrypt hash = %q, want expanded hash", got)
+	}
+}
+
+func TestAuthenticateAcceptsUppercaseSHA256(t *testing.T) {
+	hash := sha256.Sum256([]byte("secret"))
+	cfg := Config{Users: map[string]User{
+		"alice@example.test": {PasswordSHA256: strings.ToUpper(hex.EncodeToString(hash[:]))},
+	}}
+	if !cfg.Authenticate("alice@example.test", "secret") {
+		t.Fatal("Authenticate() rejected uppercase SHA-256 hash")
+	}
+}
+
 func TestValidateDKIMOnlyOnSplitLocalSide(t *testing.T) {
 	remote := Defaults()
 	remote.SplitMode = "on"
 	remote.SplitListen = "127.0.0.1:1783"
+	remote.SplitCACertFile = "split-ca.crt"
 	remote.Hostname = "smtp.example.test"
 	remote.TLSCertFile = "tls.crt"
 	remote.TLSKeyFile = "tls.key"
@@ -119,6 +398,7 @@ func TestValidateDKIMOnlyOnSplitLocalSide(t *testing.T) {
 	combined.SplitMode = "on"
 	combined.SplitListen = "127.0.0.1:1783"
 	combined.SplitConnect = "127.0.0.1:1784"
+	combined.SplitCACertFile = "split-ca.crt"
 	combined.Hostname = "smtp.example.test"
 	combined.TLSCertFile = "tls.crt"
 	combined.TLSKeyFile = "tls.key"
@@ -140,6 +420,7 @@ func TestValidateRemoteHostname(t *testing.T) {
 		cfg := Defaults()
 		cfg.SplitMode = "on"
 		cfg.SplitListen = "127.0.0.1:1783"
+		cfg.SplitCACertFile = "split-ca.crt"
 		cfg.TLSCertFile = "tls.crt"
 		cfg.TLSKeyFile = "tls.key"
 		cfg.Hostname = hostname
