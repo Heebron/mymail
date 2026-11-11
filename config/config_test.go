@@ -714,6 +714,24 @@ func TestResolveAliasesToSharedMailbox(t *testing.T) {
 	}
 }
 
+func TestStripTrainingPrefix(t *testing.T) {
+	for _, test := range []struct {
+		address string
+		want    string
+		ok      bool
+	}{
+		{address: "spam-ken@thepratts.us", want: "ken@thepratts.us", ok: true},
+		{address: "HAM-ken@thepratts.us", want: "ken@thepratts.us", ok: true},
+		{address: "spam-@thepratts.us"},
+		{address: "ken@thepratts.us"},
+	} {
+		got, ok := StripTrainingPrefix(test.address)
+		if got != test.want || ok != test.ok {
+			t.Errorf("StripTrainingPrefix(%q) = %q, %t; want %q, %t", test.address, got, ok, test.want, test.ok)
+		}
+	}
+}
+
 func TestValidateRejectsDuplicateAliases(t *testing.T) {
 	config := Config{
 		SMTPListen:  "127.0.0.1:2525",

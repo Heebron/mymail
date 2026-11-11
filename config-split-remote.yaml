@@ -7,12 +7,18 @@
 # the remote can route inbound mail, and checks SMTP authentication requests
 # received by the remote. If the local disconnects, the remote clears that
 # address list and cannot authenticate users until the local reconnects.
+# `spam-` and `ham-` prefixed forms of those addresses are also accepted and
+# forwarded to the local for spam/ham training.
 #
 # The remote also needs no public SMTP certificate: after connecting, the local
 # sends its tls_cert_file/tls_key_file pair over the verified split link, and
 # the remote serves it on ports 25, 465, and 587. The pair is held in memory
 # only. Until it arrives (for example right after the remote restarts), port
 # 465 handshakes fail and STARTTLS is not offered on 25 or 587.
+#
+# Run the same MyMail version as the local. The split handshake compares the
+# versions; on a mismatch both instances log an error with local_version and
+# remote_version, and this remote closes the split connection.
 
 # This value should be the public FQDN matching the host's reverse DNS.
 hostname: smtp.remote.example.test

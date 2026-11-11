@@ -142,6 +142,41 @@ func TestRegisterConfiguredPlugins(t *testing.T) {
 	}
 }
 
+func TestResolveRemoteMailbox(t *testing.T) {
+	mailboxes := map[string]bool{
+		"ken@thepratts.us":      true,
+		"ken@thepratts.info":    true,
+		"ken":                   true,
+		"spam-ken@example.test": true,
+	}
+	tests := []struct {
+		name    string
+		address string
+		want    string
+		ok      bool
+	}{
+		{name: "exact address", address: "ken@thepratts.us", want: "ken@thepratts.us", ok: true},
+		{name: "spam prefix", address: "spam-ken@thepratts.us", want: "ken@thepratts.us", ok: true},
+		{name: "ham prefix case insensitive", address: "HAM-ken@thepratts.us", want: "ken@thepratts.us", ok: true},
+		{name: "prefixed alias", address: "spam-ken@thepratts.info", want: "ken@thepratts.info", ok: true},
+		{name: "exact prefixed address takes precedence", address: "spam-ken@example.test", want: "spam-ken@example.test", ok: true},
+		{name: "unknown prefixed address", address: "spam-nobody@thepratts.us"},
+		{name: "empty prefixed local part", address: "spam-@thepratts.us"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got, ok := resolveRemoteMailbox(mailboxes, test.address)
+			if got != test.want || ok != test.ok {
+				t.Fatalf("resolveRemoteMailbox(%q) = %q, %t; want %q, %t", test.address, got, ok, test.want, test.ok)
+			}
+		})
+	}
+
+	if got, ok := resolveRemoteMailbox(nil, "ken@thepratts.us"); got != "" || ok {
+		t.Fatalf("resolveRemoteMailbox(nil, address) = %q, %t; want empty, false", got, ok)
+	}
+}
+
 func generateTestTLSCertificate(t *testing.T, subject pkix.Name, dnsNames []string, ips []net.IP, emails []string, uris []*url.URL) tls.Certificate {
 	return generateTestTLSCertificateWithExpiry(t, subject, dnsNames, ips, emails, uris, time.Now().Add(90*24*time.Hour))
 }

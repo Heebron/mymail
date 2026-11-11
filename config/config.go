@@ -552,6 +552,11 @@ func stripSpamHamPrefix(address string) (string, bool) {
 	return strippedLocal, true
 }
 
+// StripTrainingPrefix removes a spam- or ham-training prefix from an address.
+func StripTrainingPrefix(address string) (string, bool) {
+	return stripSpamHamPrefix(address)
+}
+
 // IsLocalDomain reports whether domain belongs to the configured host, users,
 // or aliases.
 func (c *Config) IsLocalDomain(domain string) bool {

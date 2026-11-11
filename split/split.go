@@ -16,7 +16,11 @@
 //
 //	TypeHandshake (0x00) — protocol handshake; each side sends exactly one as
 //	the first frame on every connection.
-//	Payload: [4 byte magic] where magic is 0xABBA for protocol version 1.
+//	Payload: [4 byte magic][4 byte versionLen][MyMail build version bytes]
+//	where magic is 0xABBA for protocol version 1. Builds that predate the
+//	version exchange send only the magic. Both sides must run the same build
+//	version; on a mismatch each side logs both versions and the remote
+//	closes the connection.
 //
 //	TypeMailboxList (0x02) — local sends its mailbox addresses to the remote.
 //	Payload: [4 byte streamID][4 byte count][count x ([4 byte len][address bytes])]
@@ -502,6 +506,10 @@ type Server struct {
 	Logger    *slog.Logger
 	OnReady   func()
 
+	// Version is this MyMail build's version. It is exchanged during the
+	// handshake, and a peer running a different version is disconnected.
+	Version string
+
 	// ExpectedClientDN, when non-empty, requires the connecting client's
 	// certificate subject DN to match exactly. The connection is rejected
 	// if the DN does not match.
@@ -728,10 +736,9 @@ func (s *Server) handleConn(c net.Conn) {
 	reader := bufio.NewReader(c)
 	writer := bufio.NewWriter(c)
 
-	// Perform handshake: send magic number and expect the same back.
-	handshakeData := make([]byte, 4)
-	binary.BigEndian.PutUint32(handshakeData, ProtocolMagic)
-	if err := writeFrame(writer, TypeHandshake, handshakeData); err != nil {
+	// Perform handshake: send magic number and version, and expect the same
+	// magic number and version back.
+	if err := writeFrame(writer, TypeHandshake, marshalHandshake(s.Version)); err != nil {
 		s.Logger.Warn("split handshake write error", "remote", remote, "error", err)
 		s.onDisconnected()
 		return
@@ -748,19 +755,25 @@ func (s *Server) handleConn(c net.Conn) {
 		s.onDisconnected()
 		return
 	}
-	if len(frameData) != 4 {
-		s.Logger.Warn("split handshake payload wrong length", "remote", remote, "length", len(frameData))
+	peer, err := parseHandshake(frameData)
+	if err != nil {
+		s.Logger.Warn("split handshake payload malformed", "remote", remote, "length", len(frameData), "error", err)
 		s.onDisconnected()
 		return
 	}
-	magic := binary.BigEndian.Uint32(frameData)
-	if magic != ProtocolMagic {
+	if peer.magic != ProtocolMagic {
 		s.Logger.Warn("split handshake magic mismatch",
-			"remote", remote, "expected", fmt.Sprintf("0x%08X", ProtocolMagic), "got", fmt.Sprintf("0x%08X", magic))
+			"remote", remote, "expected", fmt.Sprintf("0x%08X", ProtocolMagic), "got", fmt.Sprintf("0x%08X", peer.magic))
 		s.onDisconnected()
 		return
 	}
-	s.Logger.Info("split handshake completed", "remote", remote)
+	if !peer.matches(s.Version) {
+		s.Logger.Error("split version mismatch, closing connection from local",
+			"remote", remote, "local_version", peer.displayVersion(), "remote_version", displayVersion(s.Version))
+		s.onDisconnected()
+		return
+	}
+	s.Logger.Info("split handshake completed", "remote", remote, "version", displayVersion(s.Version))
 
 	// Create the multiplexed link wrapper and start the reader loop.
 	ln := newLink(c, s.Logger, reader, writer, s.Deliver, nil, nil, s.OnMailboxList, s.OnTLSCertificate)
@@ -813,6 +826,9 @@ type Client struct {
 	TLSConfig        *tls.Config
 	IgnoreServerName bool
 	Logger           *slog.Logger
+	// Version is this MyMail build's version. It is exchanged during the
+	// handshake; the remote closes the connection when the versions differ.
+	Version string
 	// Deliver handles mail sent by the peer over the split connection.
 	Deliver func(ctx context.Context, req SendRequest) error
 	// Submit handles a submission request sent by the peer.
@@ -930,13 +946,19 @@ func (c *Client) Start(ctx context.Context) {
 						c.closeConnection()
 						return
 					}
-					c.Logger.Warn("split client connect failed, retrying in 10s", "error", err)
+					var mismatch *VersionMismatchError
+					if errors.As(err, &mismatch) {
+						c.Logger.Error("split version mismatch, connection closed by remote; retrying in 10s",
+							"address", c.Addr, "local_version", mismatch.LocalVersion, "remote_version", mismatch.RemoteVersion)
+					} else {
+						c.Logger.Warn("split client connect failed, retrying in 10s", "error", err)
+					}
 				} else {
 					c.connMu.Lock()
 					c.conn = conn
 					c.clientLn = ln
 					c.connMu.Unlock()
-					c.Logger.Info("split client connected", "address", c.Addr, "connect_ip", c.ConnectIP)
+					c.Logger.Info("split client connected", "address", c.Addr, "connect_ip", c.ConnectIP, "version", displayVersion(c.Version))
 					if c.OnConnected != nil {
 						c.OnConnected()
 					}
@@ -1020,10 +1042,9 @@ func (c *Client) dialAndHandshake(ctx context.Context) (net.Conn, *link, error) 
 	writer := bufio.NewWriter(conn)
 	reader := bufio.NewReader(conn)
 
-	// Perform handshake: send magic number and expect the same back.
-	handshakeData := make([]byte, 4)
-	binary.BigEndian.PutUint32(handshakeData, ProtocolMagic)
-	if err := writeFrame(writer, TypeHandshake, handshakeData); err != nil {
+	// Perform handshake: send magic number and version, and expect the same
+	// magic number and version back.
+	if err := writeFrame(writer, TypeHandshake, marshalHandshake(c.Version)); err != nil {
 		conn.Close()
 		return nil, nil, fmt.Errorf("split handshake write: %w; TLS diagnosis: %s", err, explainTLSError(err, "client"))
 	}
@@ -1052,14 +1073,18 @@ func (c *Client) dialAndHandshake(ctx context.Context) (net.Conn, *link, error) 
 			conn.Close()
 			return nil, nil, fmt.Errorf("split handshake expected type 0x00, got 0x%02x", result.typ)
 		}
-		if len(result.data) != 4 {
+		peer, err := parseHandshake(result.data)
+		if err != nil {
 			conn.Close()
-			return nil, nil, fmt.Errorf("split handshake response wrong length %d", len(result.data))
+			return nil, nil, fmt.Errorf("split handshake response malformed (%d bytes): %w", len(result.data), err)
 		}
-		remoteMagic := binary.BigEndian.Uint32(result.data)
-		if remoteMagic != ProtocolMagic {
+		if peer.magic != ProtocolMagic {
 			conn.Close()
-			return nil, nil, fmt.Errorf("split handshake magic mismatch: expected 0x%08X, got 0x%08X", ProtocolMagic, remoteMagic)
+			return nil, nil, fmt.Errorf("split handshake magic mismatch: expected 0x%08X, got 0x%08X", ProtocolMagic, peer.magic)
+		}
+		if !peer.matches(c.Version) {
+			c.awaitRemoteClose(conn, reader)
+			return nil, nil, &VersionMismatchError{LocalVersion: displayVersion(c.Version), RemoteVersion: peer.displayVersion()}
 		}
 	}
 
@@ -1068,6 +1093,16 @@ func (c *Client) dialAndHandshake(ctx context.Context) (net.Conn, *link, error) 
 	ln.start()
 
 	return conn, ln, nil
+}
+
+// awaitRemoteClose lets the remote close a rejected connection; the remote
+// has the local handshake and logs the mismatch before closing. The wait is
+// bounded so an unresponsive remote cannot stall reconnection.
+func (c *Client) awaitRemoteClose(conn net.Conn, reader *bufio.Reader) {
+	if err := conn.SetReadDeadline(time.Now().Add(5 * time.Second)); err == nil {
+		_, _ = io.Copy(io.Discard, reader)
+	}
+	_ = conn.Close()
 }
 
 // Close shuts down the client connection.

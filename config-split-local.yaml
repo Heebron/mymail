@@ -1,7 +1,9 @@
 # Local split instance: runs behind the home/ISP firewall, stores mail, and
 # serves IMAP. The remote instance accepts external SMTP and relays messages.
 # For the complete split design and certificate requirements, see README.md
-# and SECURITY.md.
+# and SECURITY.md. Both instances must run the same MyMail version: on a
+# mismatch both log an error with local_version and remote_version, the remote
+# closes the split connection, and the local retries every 10 seconds.
 
 smtp_listen: 0.0.0.0:587
 # This instance receives inbound mail through the remote split peer, so a

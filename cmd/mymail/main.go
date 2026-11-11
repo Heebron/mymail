@@ -481,6 +481,7 @@ func main() {
 			TLSConfig:        clientTLSConfig,
 			IgnoreServerName: cfg.SplitIgnoreServerName,
 			Logger:           logger,
+			Version:          version,
 		}
 	}
 
@@ -501,22 +502,9 @@ func main() {
 		// Remote role: resolve uses the dynamic mailbox cache from the local side.
 		if splitEnabled && cfg.IsSplitRemote() {
 			srv.Resolve = func(address string) (string, bool) {
-				address = strings.ToLower(strings.TrimSpace(address))
 				remoteMailboxesMu.Lock()
 				defer remoteMailboxesMu.Unlock()
-				if remoteMailboxes == nil {
-					return "", false
-				}
-				if remoteMailboxes[address] {
-					return address, true
-				}
-				// Also check the local part before the @.
-				if at := strings.IndexByte(address, '@'); at > 0 {
-					if remoteMailboxes[address[:at]] {
-						return address[:at], true
-					}
-				}
-				return "", false
+				return resolveRemoteMailbox(remoteMailboxes, address)
 			}
 			srv.LocalDomain = func(domain string) bool {
 				// Remote considers a domain local if any cached mailbox belongs to it.
@@ -582,6 +570,7 @@ func main() {
 			Logger:           logger,
 			Deliver:          splitDeliver,
 			ExpectedClientDN: cfg.SplitLocalClientDN,
+			Version:          version,
 		}
 		if peerCertificates != nil {
 			splitSrv.OnTLSCertificate = peerCertificates.Set
@@ -787,4 +776,30 @@ func main() {
 		fatal("daemon stopped with error", "error", firstErr)
 	}
 	logger.Info("daemon stopped")
+}
+
+func resolveRemoteMailbox(mailboxes map[string]bool, address string) (string, bool) {
+	if mailboxes == nil {
+		return "", false
+	}
+	address = strings.ToLower(strings.TrimSpace(address))
+	if mailbox, ok := findRemoteMailbox(mailboxes, address); ok {
+		return mailbox, true
+	}
+	if stripped, ok := config.StripTrainingPrefix(address); ok {
+		return findRemoteMailbox(mailboxes, stripped)
+	}
+	return "", false
+}
+
+func findRemoteMailbox(mailboxes map[string]bool, address string) (string, bool) {
+	if mailboxes[address] {
+		return address, true
+	}
+	if at := strings.IndexByte(address, '@'); at > 0 {
+		if mailboxes[address[:at]] {
+			return address[:at], true
+		}
+	}
+	return "", false
 }

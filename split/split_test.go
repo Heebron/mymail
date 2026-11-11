@@ -316,6 +316,7 @@ func startConfiguredTestSplitPair(t *testing.T, serverDeliver, clientDeliver fun
 		Addr:         addr,
 		TLSConfig:    &tls.Config{InsecureSkipVerify: true, MinVersion: tls.VersionTLS12},
 		Logger:       logger,
+		Version:      server.Version,
 		Deliver:      clientDeliver,
 		Submit:       clientSubmit,
 		Authenticate: clientAuthenticate,

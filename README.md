@@ -291,6 +291,12 @@ that certificate is required before the link exists; issue it from your private
 split CA and set `split_ca_cert_file` to that CA on the local. The local does not
 send its key when `split_insecure_skip_verify` is enabled. A `tls_cert_file`
 configured on the remote is served until the local's certificate arrives.
+The local and remote must run the same MyMail version (the `-version` output).
+The split handshake exchanges both versions; on a mismatch, both instances log
+an error showing `local_version` and `remote_version`, and the remote closes the
+connection. The local retries every 10 seconds, so the link comes back once both
+sides run the same build. Builds that predate the version exchange are reported
+as an unknown version, so upgrade both instances together.
 ### `mymail-password`
 
 `mymail-password` reads a password from standard input and prints a bcrypt hash
