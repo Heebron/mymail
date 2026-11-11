@@ -54,6 +54,8 @@ type SplitForwarder func(ctx context.Context, from, recipient string, data []byt
 type Server struct {
 	// Addr is the TCP address to listen on.
 	Addr string
+	// TLSConfig enables implicit TLS when non-nil.
+	TLSConfig *tls.Config
 	// StartTLSConfig enables STARTTLS when non-nil.
 	StartTLSConfig *tls.Config
 	// RequireSTARTTLS blocks authentication and MAIL until TLS is active.
@@ -114,11 +116,17 @@ func (s *Server) ListenAndServe(ctx context.Context) error {
 	if s.Logger == nil {
 		s.Logger = slog.Default()
 	}
-	listener, err := net.Listen("tcp", s.Addr)
+	var listener net.Listener
+	var err error
+	if s.TLSConfig != nil {
+		listener, err = tls.Listen("tcp", s.Addr, s.TLSConfig)
+	} else {
+		listener, err = net.Listen("tcp", s.Addr)
+	}
 	if err != nil {
 		return fmt.Errorf("listen SMTP on %s: %w", s.Addr, err)
 	}
-	s.Logger.Info("SMTP server listening", "address", listener.Addr().String(), "tls", false)
+	s.Logger.Info("SMTP server listening", "address", listener.Addr().String(), "tls", s.TLSConfig != nil)
 	if s.OnReady != nil {
 		s.OnReady()
 	}
@@ -294,7 +302,7 @@ func (s *Server) handle(ctx context.Context, conn net.Conn) {
 	if s.AuthLimiter != nil {
 		authConnection = s.AuthLimiter.NewConnection(remoteAddr)
 	}
-	tlsActive := false
+	_, tlsActive := conn.(*tls.Conn)
 	reader := bufio.NewReaderSize(conn, 64*1024)
 	writer := bufio.NewWriterSize(conn, 16*1024)
 	write := func(format string, args ...any) error {

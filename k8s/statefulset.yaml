@@ -71,6 +71,8 @@ spec:
               name: smtp
             - containerPort: 587
               name: submission
+            - containerPort: 465
+              name: submissions
             - containerPort: 143
               name: imap
             - containerPort: 993

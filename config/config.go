@@ -60,14 +60,15 @@ func (d DKIMConfig) HasDKIM() bool {
 
 // Config is the validated YAML configuration for the MyMail daemon.
 type Config struct {
-	// SMTPListen is the STARTTLS-capable SMTP listener address.
+	// SMTPListen is the SMTP submission listener address. It always requires
+	// STARTTLS before authentication or message submission.
 	SMTPListen string `yaml:"smtp_listen"`
 	// SMTPCleartextListen is the optional cleartext SMTP listener address.
 	SMTPCleartextListen string `yaml:"smtp_cleartext_listen,omitempty"`
+	// SMTPTLSListen is the optional implicit-TLS SMTP listener address.
+	SMTPTLSListen string `yaml:"smtp_tls_listen,omitempty"`
 	// SMTPRelayNetwork selects the network used for outbound MX connections.
 	SMTPRelayNetwork string `yaml:"smtp_relay_network,omitempty"`
-	// SMTPRequireSTARTTLS requires TLS before SMTP authentication or MAIL.
-	SMTPRequireSTARTTLS bool `yaml:"smtp_require_starttls,omitempty"`
 	// IMAPListen is the cleartext IMAP listener address, optionally with
 	// STARTTLS.
 	IMAPListen string `yaml:"imap_listen"`
@@ -159,6 +160,7 @@ func Load(path string) (Config, error) {
 func (c *Config) expandEnvironment() {
 	c.SMTPListen = expandEnvironment(c.SMTPListen)
 	c.SMTPCleartextListen = expandEnvironment(c.SMTPCleartextListen)
+	c.SMTPTLSListen = expandEnvironment(c.SMTPTLSListen)
 	c.SMTPRelayNetwork = expandEnvironment(c.SMTPRelayNetwork)
 	c.IMAPListen = expandEnvironment(c.IMAPListen)
 	c.IMAPTLSListen = expandEnvironment(c.IMAPTLSListen)
@@ -229,6 +231,9 @@ func (c *Config) Validate() error {
 			return err
 		}
 	}
+	if strings.TrimSpace(c.SMTPTLSListen) != "" && (strings.TrimSpace(c.TLSCertFile) == "" || strings.TrimSpace(c.TLSKeyFile) == "") {
+		return errors.New("smtp_tls_listen requires tls_cert_file and tls_key_file")
+	}
 	if splitEnabled && c.IsSplitRemote() {
 		// Remote side does not need IMAP; only SMTP is required.
 		if strings.TrimSpace(c.SMTPListen) == "" {
@@ -239,10 +244,14 @@ func (c *Config) Validate() error {
 			return errors.New("smtp_listen and imap_listen are required")
 		}
 	}
-	hasTLSListener := strings.TrimSpace(c.IMAPTLSListen) != ""
+	hasTLSListener := strings.TrimSpace(c.IMAPTLSListen) != "" || strings.TrimSpace(c.SMTPTLSListen) != ""
 	hasTLSFiles := strings.TrimSpace(c.TLSCertFile) != "" || strings.TrimSpace(c.TLSKeyFile) != ""
-	if (hasTLSListener || hasTLSFiles || c.SMTPRequireSTARTTLS || c.IMAPRequireSTARTTLS) && (strings.TrimSpace(c.TLSCertFile) == "" || strings.TrimSpace(c.TLSKeyFile) == "") {
+	hasTLSCertAndKey := strings.TrimSpace(c.TLSCertFile) != "" && strings.TrimSpace(c.TLSKeyFile) != ""
+	if (hasTLSListener || hasTLSFiles || c.IMAPRequireSTARTTLS) && !hasTLSCertAndKey {
 		return errors.New("tls_cert_file and tls_key_file must be configured together")
+	}
+	if strings.TrimSpace(c.SMTPListen) != "" && !hasTLSCertAndKey {
+		return errors.New("smtp_listen requires tls_cert_file and tls_key_file because STARTTLS is always required")
 	}
 	if strings.TrimSpace(c.Hostname) == "" {
 		return errors.New("hostname is required")

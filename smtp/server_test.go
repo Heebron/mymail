@@ -1427,6 +1427,146 @@ func TestSMTPStartTLS(t *testing.T) {
 	}
 }
 
+func TestSMTPImplicitTLSWithSplitForward(t *testing.T) {
+	probe, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	addr := probe.Addr().String()
+	if err := probe.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	type forwardedMessage struct {
+		from      string
+		recipient string
+		data      []byte
+	}
+	forwarded := make(chan forwardedMessage, 1)
+	ready := make(chan struct{}, 1)
+	server := &Server{
+		Addr:      addr,
+		TLSConfig: testTLSConfig(t),
+		Hostname:  "mail.example.test",
+		Resolve:   func(string) (string, bool) { return "", false },
+		LocalDomain: func(string) bool {
+			return false
+		},
+		AuthenticateContext: func(_ context.Context, username, password string) (bool, error) {
+			return username == "alice@example.test" && password == "secret", nil
+		},
+		SplitForward: func(_ context.Context, from, recipient string, data []byte, _ func(context.Context, string, string, []byte) error) error {
+			forwarded <- forwardedMessage{from: from, recipient: recipient, data: append([]byte(nil), data...)}
+			return nil
+		},
+		Logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
+		OnReady: func() { ready <- struct{}{} },
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- server.ListenAndServe(ctx) }()
+	select {
+	case <-ready:
+	case <-time.After(5 * time.Second):
+		cancel()
+		t.Fatal("timed out waiting for implicit-TLS SMTP listener")
+	}
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case err := <-done:
+			if err != nil {
+				t.Errorf("ListenAndServe() = %v", err)
+			}
+		case <-time.After(5 * time.Second):
+			t.Error("timed out waiting for implicit-TLS SMTP listener shutdown")
+		}
+	})
+
+	client, err := tls.DialWithDialer(&net.Dialer{Timeout: 5 * time.Second}, "tcp", addr, &tls.Config{
+		InsecureSkipVerify: true, // The test listener uses a self-signed certificate.
+		ServerName:         "mail.example.test",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	if err := client.SetDeadline(time.Now().Add(5 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	reader := bufio.NewReader(client)
+	readLine := func() string {
+		t.Helper()
+		line, err := reader.ReadString('\n')
+		if err != nil {
+			t.Fatal(err)
+		}
+		return strings.TrimRight(line, "\r\n")
+	}
+	write := func(line string) {
+		t.Helper()
+		if _, err := io.WriteString(client, line+"\r\n"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if greeting := readLine(); !strings.HasPrefix(greeting, "220 ") {
+		t.Fatalf("greeting = %q", greeting)
+	}
+	write("EHLO localhost")
+	capabilities := make([]string, 0, 6)
+	for {
+		line := readLine()
+		capabilities = append(capabilities, line)
+		if strings.HasPrefix(line, "250 ") {
+			break
+		}
+	}
+	if !containsLine(capabilities, "250-AUTH PLAIN LOGIN") {
+		t.Fatalf("implicit-TLS capabilities do not advertise AUTH: %#v", capabilities)
+	}
+	if containsLine(capabilities, "250-STARTTLS") {
+		t.Fatalf("implicit-TLS capabilities advertise STARTTLS: %#v", capabilities)
+	}
+	write("STARTTLS")
+	if response := readLine(); !strings.HasPrefix(response, "503 ") {
+		t.Fatalf("STARTTLS response on implicit-TLS connection = %q, want 503", response)
+	}
+	credentials := base64.StdEncoding.EncodeToString([]byte("\x00alice@example.test\x00secret"))
+	write("AUTH PLAIN " + credentials)
+	if response := readLine(); !strings.HasPrefix(response, "235 ") {
+		t.Fatalf("AUTH response = %q, want 235", response)
+	}
+	write("MAIL FROM:<alice@example.test>")
+	if response := readLine(); !strings.HasPrefix(response, "250 ") {
+		t.Fatalf("MAIL response = %q, want 250", response)
+	}
+	write("RCPT TO:<recipient@external.test>")
+	if response := readLine(); !strings.HasPrefix(response, "250 ") {
+		t.Fatalf("external RCPT response = %q, want 250", response)
+	}
+	write("DATA")
+	if response := readLine(); !strings.HasPrefix(response, "354 ") {
+		t.Fatalf("DATA response = %q, want 354", response)
+	}
+	if _, err := io.WriteString(client, "Subject: implicit TLS split submission\r\n\r\nbody\r\n.\r\n"); err != nil {
+		t.Fatal(err)
+	}
+	if response := readLine(); !strings.HasPrefix(response, "250 ") {
+		t.Fatalf("message response = %q, want 250", response)
+	}
+	select {
+	case got := <-forwarded:
+		if got.from != "alice@example.test" || got.recipient != "recipient@external.test" {
+			t.Fatalf("SplitForward request = from %q recipient %q", got.from, got.recipient)
+		}
+		if !bytes.Contains(got.data, []byte("Subject: implicit TLS split submission")) {
+			t.Fatalf("SplitForward data = %q, want submitted message", got.data)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for split forwarding")
+	}
+}
+
 func TestSMTPSpamdTrainingDelivery(t *testing.T) {
 	spamdListener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {

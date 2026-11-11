@@ -214,6 +214,7 @@ func main() {
 	logger.Info("configuration listeners",
 		"smtp_listen", cfg.SMTPListen,
 		"smtp_cleartext_listen", cfg.SMTPCleartextListen,
+		"smtp_tls_listen", cfg.SMTPTLSListen,
 	)
 	relayNetwork := cfg.SMTPRelayNetwork
 	if relayNetwork == "" {
@@ -229,7 +230,6 @@ func main() {
 	logger.Info("configuration TLS",
 		"tls_cert_file", cfg.TLSCertFile,
 		"tls_key_file", cfg.TLSKeyFile,
-		"smtp_require_starttls", cfg.SMTPRequireSTARTTLS,
 	)
 	if !isRemoteOnly {
 		logger.Info("configuration IMAP TLS",
@@ -437,9 +437,9 @@ func main() {
 	var remoteMailboxesMu sync.Mutex
 	var remoteMailboxes map[string]bool // address -> true
 
-	newSMTPServer := func(addr string, startTLSConfig *tls.Config, requireSTARTTLS bool) *smtp.Server {
+	newSMTPServer := func(addr string, implicitTLSConfig, startTLSConfig *tls.Config, requireSTARTTLS bool) *smtp.Server {
 		srv := &smtp.Server{
-			Addr: addr, StartTLSConfig: startTLSConfig, RequireSTARTTLS: requireSTARTTLS, Hostname: cfg.Hostname, RelayNetwork: cfg.SMTPRelayNetwork, Store: store,
+			Addr: addr, TLSConfig: implicitTLSConfig, StartTLSConfig: startTLSConfig, RequireSTARTTLS: requireSTARTTLS, Hostname: cfg.Hostname, RelayNetwork: cfg.SMTPRelayNetwork, Store: store,
 			Processors: processors, Resolve: resolve, LocalDomain: localDomain, DKIMSigner: dkimSigner, Authenticate: authenticate, AuthLimiter: authLimiter, Logger: logger,
 		}
 		// Remote role: resolve uses the dynamic mailbox cache from the local side.
@@ -491,9 +491,12 @@ func main() {
 			Authenticate: authenticate, AuthLimiter: authLimiter, Logger: logger,
 		}
 	}
-	smtpServers := []*smtp.Server{newSMTPServer(cfg.SMTPListen, tlsConfig, cfg.SMTPRequireSTARTTLS)}
+	smtpServers := []*smtp.Server{newSMTPServer(cfg.SMTPListen, nil, tlsConfig, true)}
 	if cfg.SMTPCleartextListen != "" {
-		smtpServers = append(smtpServers, newSMTPServer(cfg.SMTPCleartextListen, nil, false))
+		smtpServers = append(smtpServers, newSMTPServer(cfg.SMTPCleartextListen, nil, nil, false))
+	}
+	if cfg.SMTPTLSListen != "" {
+		smtpServers = append(smtpServers, newSMTPServer(cfg.SMTPTLSListen, tlsConfig.Clone(), nil, false))
 	}
 	if splitClient != nil {
 		splitClient.Deliver = func(ctx context.Context, req split.SendRequest) error {

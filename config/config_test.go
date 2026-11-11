@@ -17,7 +17,7 @@ func TestLoadYAML(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.yaml")
 	contents := []byte(`smtp_listen: 127.0.0.1:2525
 smtp_cleartext_listen: 127.0.0.1:25
-smtp_require_starttls: true
+smtp_tls_listen: 127.0.0.1:2465
 imap_listen: 127.0.0.1:1143
 imap_tls_listen: 127.0.0.1:1993
 imap_require_starttls: true
@@ -52,14 +52,14 @@ users:
 	if err != nil {
 		t.Fatalf("Load() error = %v", err)
 	}
-	if got.SMTPListen != "127.0.0.1:2525" || got.SMTPCleartextListen != "127.0.0.1:25" || got.IMAPListen != "127.0.0.1:1143" {
+	if got.SMTPListen != "127.0.0.1:2525" || got.SMTPCleartextListen != "127.0.0.1:25" || got.SMTPTLSListen != "127.0.0.1:2465" || got.IMAPListen != "127.0.0.1:1143" {
 		t.Fatalf("listeners = %#v", got)
 	}
 	if got.IMAPTLSListen != "127.0.0.1:1993" {
 		t.Fatalf("TLS listeners = %#v", got)
 	}
-	if !got.SMTPRequireSTARTTLS || !got.IMAPRequireSTARTTLS {
-		t.Fatalf("required STARTTLS settings = %#v", got)
+	if !got.IMAPRequireSTARTTLS {
+		t.Fatalf("required IMAP STARTTLS setting = %t", got.IMAPRequireSTARTTLS)
 	}
 	if got.TLSCertFile != "/etc/mymail/tls.crt" || got.TLSKeyFile != "/etc/mymail/tls.key" {
 		t.Fatalf("TLS certificate files = %#v", got)
@@ -166,6 +166,8 @@ func TestValidateRemoteHostname(t *testing.T) {
 	}
 
 	local := Defaults()
+	local.TLSCertFile = "tls.crt"
+	local.TLSKeyFile = "tls.key"
 	local.Users = map[string]User{"alice@example.test": {Password: "secret"}}
 	if err := local.Validate(); err != nil {
 		t.Fatalf("non-split Validate() with default localhost hostname error = %v", err)
@@ -185,6 +187,8 @@ func TestValidateSMTPRelayNetwork(t *testing.T) {
 	} {
 		t.Run(tt.value, func(t *testing.T) {
 			cfg := Defaults()
+			cfg.TLSCertFile = "tls.crt"
+			cfg.TLSKeyFile = "tls.key"
 			cfg.Users = map[string]User{"alice@example.test": {Password: "secret"}}
 			cfg.SMTPRelayNetwork = tt.value
 			if err := cfg.Validate(); err != nil {
@@ -217,6 +221,9 @@ func TestLoadYAMLPluginConfigurationIsOptionalAndOrdered(t *testing.T) {
 users:
   alice@example.test:
     password: secret
+smtp_listen: 127.0.0.1:2525
+tls_cert_file: /etc/mymail/tls.crt
+tls_key_file: /etc/mymail/tls.key
 `)
 	if err := os.WriteFile(path, contents, 0600); err != nil {
 		t.Fatal(err)
@@ -303,6 +310,8 @@ func TestValidateRejectsInvalidAuthThrottle(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			config := Defaults()
+			config.TLSCertFile = "tls.crt"
+			config.TLSKeyFile = "tls.key"
 			config.MaildirRoot = t.TempDir()
 			config.Users = map[string]User{"alice@example.test": {Password: "secret"}}
 			test.adjust(&config)
@@ -377,6 +386,8 @@ func TestValidateRejectsDuplicateAliases(t *testing.T) {
 	config := Config{
 		SMTPListen:  "127.0.0.1:2525",
 		IMAPListen:  "127.0.0.1:1143",
+		TLSCertFile: "/etc/mymail/tls.crt",
+		TLSKeyFile:  "/etc/mymail/tls.key",
 		MaildirRoot: t.TempDir(),
 		Hostname:    "mail.example.test",
 		Users: map[string]User{
@@ -393,6 +404,8 @@ func TestValidateRejectsInvalidPlugins(t *testing.T) {
 	base := Config{
 		SMTPListen:  "127.0.0.1:2525",
 		IMAPListen:  "127.0.0.1:1143",
+		TLSCertFile: "/etc/mymail/tls.crt",
+		TLSKeyFile:  "/etc/mymail/tls.key",
 		MaildirRoot: t.TempDir(),
 		Hostname:    "mail.example.test",
 		Users: map[string]User{
@@ -434,6 +447,8 @@ func TestValidateRejectsDuplicateMailboxes(t *testing.T) {
 			config := Config{
 				SMTPListen:  "127.0.0.1:2525",
 				IMAPListen:  "127.0.0.1:1143",
+				TLSCertFile: "/etc/mymail/tls.crt",
+				TLSKeyFile:  "/etc/mymail/tls.key",
 				MaildirRoot: t.TempDir(),
 				Hostname:    "mail.example.test",
 				Users:       test.users,
@@ -451,6 +466,8 @@ func TestValidateRejectsMailboxControlCharacters(t *testing.T) {
 			config := Config{
 				SMTPListen:  "127.0.0.1:2525",
 				IMAPListen:  "127.0.0.1:1143",
+				TLSCertFile: "/etc/mymail/tls.crt",
+				TLSKeyFile:  "/etc/mymail/tls.key",
 				MaildirRoot: t.TempDir(),
 				Hostname:    "mail.example.test",
 				Users: map[string]User{
@@ -467,6 +484,7 @@ func TestValidateRejectsMailboxControlCharacters(t *testing.T) {
 func TestLoadYAMLEnvironmentExpansion(t *testing.T) {
 	t.Setenv("MYMAIL_SMTP_LISTEN", "127.0.0.1:3525")
 	t.Setenv("MYMAIL_SMTP_CLEARTEXT_LISTEN", "127.0.0.1:3025")
+	t.Setenv("MYMAIL_SMTP_TLS_LISTEN", "127.0.0.1:3465")
 	t.Setenv("MYMAIL_IMAP_LISTEN", "127.0.0.1:2143")
 	t.Setenv("MYMAIL_IMAP_TLS_LISTEN", "127.0.0.1:2993")
 	t.Setenv("MYMAIL_ROOT", t.TempDir())
@@ -481,6 +499,7 @@ func TestLoadYAMLEnvironmentExpansion(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.yaml")
 	contents := []byte(`smtp_listen: ${MYMAIL_SMTP_LISTEN}
 smtp_cleartext_listen: ${MYMAIL_SMTP_CLEARTEXT_LISTEN}
+smtp_tls_listen: ${MYMAIL_SMTP_TLS_LISTEN}
 imap_listen: ${MYMAIL_IMAP_LISTEN}
 imap_tls_listen: ${MYMAIL_IMAP_TLS_LISTEN}
 tls_cert_file: ${MYMAIL_TLS_CERT}
@@ -509,7 +528,7 @@ users:
 	if err != nil {
 		t.Fatalf("Load() error = %v", err)
 	}
-	if got.SMTPListen != "127.0.0.1:3525" || got.SMTPCleartextListen != "127.0.0.1:3025" || got.IMAPListen != "127.0.0.1:2143" {
+	if got.SMTPListen != "127.0.0.1:3525" || got.SMTPCleartextListen != "127.0.0.1:3025" || got.SMTPTLSListen != "127.0.0.1:3465" || got.IMAPListen != "127.0.0.1:2143" {
 		t.Fatalf("listeners = %#v", got)
 	}
 	if got.IMAPTLSListen != "127.0.0.1:2993" {
@@ -578,6 +597,10 @@ func TestLoadYAMLTLSValidationError(t *testing.T) {
 			name: "missing key",
 			body: "tls_cert_file: /etc/mymail/tls.crt\nimap_tls_listen: 127.0.0.1:1993\n",
 		},
+		{
+			name: "smtp tls listener requires certificate",
+			body: "smtp_tls_listen: 127.0.0.1:2465\n",
+		},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -608,18 +631,37 @@ func TestValidateAllowsTLSForSTARTTLSOnly(t *testing.T) {
 	}
 }
 
-func TestValidateRequiresTLSFilesForRequiredSTARTTLS(t *testing.T) {
-	for _, field := range []string{"smtp_require_starttls", "imap_require_starttls"} {
-		t.Run(field, func(t *testing.T) {
-			path := filepath.Join(t.TempDir(), "config.yaml")
-			contents := []byte("smtp_listen: 127.0.0.1:2525\nimap_listen: 127.0.0.1:1143\nmaildir_root: /tmp/mymail\nhostname: mail.example.test\nusers:\n  alice@example.test:\n    password: secret\n" + field + ": true\n")
-			if err := os.WriteFile(path, contents, 0600); err != nil {
-				t.Fatal(err)
-			}
-			if _, err := Load(path); err == nil {
-				t.Fatal("Load() succeeded without TLS certificate files")
-			}
-		})
+func TestValidateSMTPListenRequiresTLSFiles(t *testing.T) {
+	config := Config{
+		SMTPListen:  "127.0.0.1:2525",
+		IMAPListen:  "127.0.0.1:1143",
+		MaildirRoot: t.TempDir(),
+		Hostname:    "mail.example.test",
+		Users:       map[string]User{"alice@example.test": {Password: "secret"}},
+	}
+	if err := config.Validate(); err == nil || !strings.Contains(err.Error(), "smtp_listen requires tls_cert_file and tls_key_file") {
+		t.Fatalf("Validate() error = %v, want smtp_listen TLS requirement", err)
+	}
+}
+
+func TestValidateIMAPRequireSTARTTLSRequiresTLSFiles(t *testing.T) {
+	config := Config{
+		SMTPListen:          "127.0.0.1:2525",
+		IMAPListen:          "127.0.0.1:1143",
+		IMAPRequireSTARTTLS: true,
+		MaildirRoot:         t.TempDir(),
+		Hostname:            "mail.example.test",
+		Users:               map[string]User{"alice@example.test": {Password: "secret"}},
+	}
+	if err := config.Validate(); err == nil {
+		t.Fatal("Validate() succeeded without TLS certificate files")
+	}
+}
+
+func TestValidateSMTPTLSListenRequiresTLSFiles(t *testing.T) {
+	config := Config{SMTPTLSListen: "127.0.0.1:2465"}
+	if err := config.Validate(); err == nil || !strings.Contains(err.Error(), "smtp_tls_listen requires tls_cert_file and tls_key_file") {
+		t.Fatalf("Validate() error = %v, want smtp_tls_listen TLS requirement", err)
 	}
 }
 
@@ -660,6 +702,8 @@ func TestLoadYAMLDKIMConfiguration(t *testing.T) {
 	path := filepath.Join(tmpDir, "config.yaml")
 	contents := []byte(fmt.Sprintf(`smtp_listen: 127.0.0.1:2525
 imap_listen: 127.0.0.1:1143
+tls_cert_file: /etc/mymail/tls.crt
+tls_key_file: /etc/mymail/tls.key
 maildir_root: %s/mail
 hostname: mail.thepratts.info
 dkim:
@@ -767,6 +811,8 @@ func TestValidateDKIMConfigurationMustBeConfiguredTogether(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			cfg := Defaults()
+			cfg.TLSCertFile = "tls.crt"
+			cfg.TLSKeyFile = "tls.key"
 			cfg.MaildirRoot = t.TempDir()
 			cfg.Hostname = "mail.thepratts.info"
 			cfg.Users = map[string]User{"alice@thepratts.info": {Password: "secret"}}
@@ -790,6 +836,8 @@ func TestValidateDKIMConfigurationMustBeConfiguredTogether(t *testing.T) {
 func TestValidateDKIMRejectsInvalidKeys(t *testing.T) {
 	_, pubPEM := generateTestRSAKey(t)
 	cfg := Defaults()
+	cfg.TLSCertFile = "tls.crt"
+	cfg.TLSKeyFile = "tls.key"
 	cfg.MaildirRoot = t.TempDir()
 	cfg.Hostname = "mail.thepratts.info"
 	cfg.Users = map[string]User{"alice@thepratts.info": {Password: "secret"}}
@@ -810,6 +858,8 @@ func TestValidateDKIMRejectsMismatchedKeys(t *testing.T) {
 	_, pubPEM2 := generateTestRSAKey(t)
 
 	cfg := Defaults()
+	cfg.TLSCertFile = "tls.crt"
+	cfg.TLSKeyFile = "tls.key"
 	cfg.MaildirRoot = t.TempDir()
 	cfg.Hostname = "mail.thepratts.info"
 	cfg.Users = map[string]User{"alice@thepratts.info": {Password: "secret"}}
@@ -836,6 +886,8 @@ func TestLoadYAMLDKIMConfigurationInlinePEM(t *testing.T) {
 	path := filepath.Join(tmpDir, "config.yaml")
 	contents := []byte(fmt.Sprintf(`smtp_listen: 127.0.0.1:2525
 imap_listen: 127.0.0.1:1143
+tls_cert_file: /etc/mymail/tls.crt
+tls_key_file: /etc/mymail/tls.key
 maildir_root: %s/mail
 hostname: mail.thepratts.info
 dkim:
@@ -871,6 +923,8 @@ func TestLoadYAMLDKIMConfigurationMissingFileReportsClearError(t *testing.T) {
 	path := filepath.Join(tmpDir, "config.yaml")
 	contents := []byte(fmt.Sprintf(`smtp_listen: 127.0.0.1:2525
 imap_listen: 127.0.0.1:1143
+tls_cert_file: /etc/mymail/tls.crt
+tls_key_file: /etc/mymail/tls.key
 maildir_root: %s/mail
 hostname: mail.thepratts.info
 dkim:

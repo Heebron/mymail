@@ -131,16 +131,17 @@ The daemon exits after all listener goroutines have stopped. A supervisor may
 forcibly terminate it if its configured stop timeout expires before this
 sequence completes.
 
-The default listeners are cleartext SMTP `:25`, SMTP submission `:587`
-(plaintext until `STARTTLS`), and IMAP `:1143`.
+The default listeners are cleartext SMTP `:25`, SMTP submission `:587` (always
+requiring `STARTTLS`), optional implicit-TLS SMTP submission `:465`, and IMAP
+`:1143`.
 Use a reverse proxy, firewall rules, or privileged socket activation when
 exposing standard ports. Set `tls_cert_file` and `tls_key_file` to enable
-`STARTTLS` on the SMTP submission and IMAP listeners. The cleartext SMTP
-listener is configured with `smtp_cleartext_listen`; IMAP can additionally
-expose an implicit TLS listener by setting `imap_tls_listen`.
+`STARTTLS` on `smtp_listen` and `imap_listen`, and to enable implicit TLS on
+`smtp_tls_listen` and `imap_tls_listen`. The cleartext SMTP listener is
+configured with `smtp_cleartext_listen`.
 The checked-in `config.example.yaml` demonstrates STARTTLS with certificate
-paths under `/etc/mymail`; install those files before starting the service, or
-comment the two TLS file entries when running without TLS.
+paths under `/etc/mymail`; install those files before starting the service,
+because the SMTP submission listener requires a certificate and key.
 
 ### Kubernetes
 
@@ -157,8 +158,8 @@ kubectl kustomize k8s
 kubectl apply -k k8s
 ```
 
-The Kubernetes deployment exposes SMTP, submission, IMAP, and implicit TLS
-IMAP through a `LoadBalancer` service. During pod shutdown, readiness fails
+The Kubernetes deployment exposes SMTP, submission, implicit-TLS SMTP, IMAP,
+and implicit-TLS IMAP through a `LoadBalancer` service. During pod shutdown, readiness fails
 immediately and the pod has up to 180 seconds to drain existing connections.
 
 The StatefulSet also includes a `spamd` sidecar. Build and publish the image
@@ -316,15 +317,14 @@ plugins:
 Plugin setting values support the same environment expansion as other
 configuration values.
 
-`tls_cert_file` and `tls_key_file` enable `STARTTLS` on the SMTP
-`smtp_listen` and IMAP `imap_listen` endpoints. `imap_tls_listen` additionally
-enables an IMAP implicit TLS endpoint and requires both certificate files. TLS
-certificate and key paths may also use
-environment variables. Set `smtp_require_starttls: true` to require SMTP
-clients on `smtp_listen` to negotiate STARTTLS before authenticating or
-submitting a message,
-and set `imap_require_starttls: true` to require it before IMAP authentication.
-Each setting requires both TLS certificate files. The example configuration
+`smtp_listen` always requires `STARTTLS` before authentication or submission.
+`tls_cert_file` and `tls_key_file` are required for that listener and enable
+`STARTTLS` on the IMAP `imap_listen` endpoint. Set `smtp_tls_listen` to add an
+implicit-TLS SMTP endpoint, normally `0.0.0.0:465`; `imap_tls_listen` adds an
+implicit-TLS IMAP endpoint. These TLS listeners also require both certificate
+files. TLS certificate and key paths may use environment variables. Set
+`imap_require_starttls: true` to require STARTTLS before IMAP authentication.
+The example configuration
 enables both settings.
 
 Authentication throttling is enabled by default and is shared by all SMTP and

@@ -18,6 +18,10 @@ spec:
       protocol: TCP
       port: 587
       targetPort: submission
+    - name: submissions
+      protocol: TCP
+      port: 465
+      targetPort: submissions
     - name: imap
       protocol: TCP
       port: 143
