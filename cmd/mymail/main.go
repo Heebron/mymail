@@ -499,6 +499,12 @@ func main() {
 		splitClient.Deliver = func(ctx context.Context, req split.SendRequest) error {
 			return smtpServers[0].DeliverLocal(ctx, req.From, req.Recipient, req.Data)
 		}
+		splitClient.Submit = func(ctx context.Context, req split.SendRequest) error {
+			return smtpServers[0].Submit(ctx, req.From, req.Recipient, req.Data)
+		}
+		splitClient.Authenticate = func(ctx context.Context, username, password string) (bool, error) {
+			return authenticate(username, password), nil
+		}
 	}
 
 	// Split server: only created when this instance listens for split connections
@@ -542,10 +548,22 @@ func main() {
 	} else if splitEnabled && cfg.IsSplitRemote() {
 		for _, srv := range smtpServers {
 			// Remote side: forward mail for local mailboxes back to local
-			// over the accepted split connection, and relay external mail via MX.
+			// over the accepted split connection. External mail is submitted
+			// through the local side so it is DKIM-signed before relay.
+			srv.AuthenticateContext = func(ctx context.Context, username, password string) (bool, error) {
+				authCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+				defer cancel()
+				ok, err := splitSrv.Authenticate(authCtx, username, password)
+				if errors.Is(err, split.ErrAuthRejected) {
+					return false, nil
+				}
+				return ok, err
+			}
 			srv.SplitForward = func(ctx context.Context, from, recipient string, data []byte, fallback func(context.Context, string, string, []byte) error) error {
 				if _, ok := srv.Resolve(recipient); !ok {
-					return fallback(ctx, from, recipient, data)
+					submitCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+					defer cancel()
+					return splitSrv.Submit(submitCtx, split.SendRequest{From: from, Recipient: recipient, Data: data})
 				}
 				return splitSrv.Send(ctx, split.SendRequest{From: from, Recipient: recipient, Data: data})
 			}

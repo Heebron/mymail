@@ -9,6 +9,7 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
+	"errors"
 	"io"
 	"log/slog"
 	"math/big"
@@ -77,7 +78,76 @@ func TestSplitSendLogsAcknowledgement(t *testing.T) {
 	}
 }
 
+func TestSplitAuthenticate(t *testing.T) {
+	var logs bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&logs, nil))
+	server, _ := startTestSplitPairWithCallbacks(t,
+		func(context.Context, SendRequest) error { return nil },
+		func(context.Context, SendRequest) error { return nil },
+		nil,
+		func(_ context.Context, username, password string) (bool, error) {
+			return username == "alice@example.test" && password == "secret", nil
+		},
+		logger,
+	)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	ok, err := server.Authenticate(ctx, "alice@example.test", "secret")
+	if err != nil || !ok {
+		t.Fatalf("Authenticate(valid) = %t, %v; want true, nil; logs: %s", ok, err, logs.String())
+	}
+	if ok, err := server.Authenticate(ctx, "alice@example.test", "wrong"); ok || !errors.Is(err, ErrAuthRejected) {
+		t.Fatalf("Authenticate(invalid) = %t, %v; want false, ErrAuthRejected", ok, err)
+	}
+}
+
+func TestSplitAuthenticateWithoutConnection(t *testing.T) {
+	if ok, err := (&Server{}).Authenticate(context.Background(), "alice@example.test", "secret"); ok || err == nil {
+		t.Fatalf("Authenticate() without connection = %t, %v; want false and an error", ok, err)
+	}
+}
+
+func TestSplitSubmitDispatchesAndPropagatesHandlerError(t *testing.T) {
+	requests := make(chan SendRequest, 2)
+	handlerErr := error(nil)
+	server, _ := startTestSplitPairWithCallbacks(t,
+		func(context.Context, SendRequest) error { return nil },
+		func(context.Context, SendRequest) error { return nil },
+		func(_ context.Context, req SendRequest) error {
+			requests <- req
+			return handlerErr
+		},
+		nil,
+	)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	req := SendRequest{From: "alice@example.test", Recipient: "bob@outside.test", Data: []byte("Subject: test\r\n\r\nbody")}
+
+	if err := server.Submit(ctx, req); err != nil {
+		t.Fatalf("Submit() error = %v", err)
+	}
+	assertSendRequest(t, receiveSendRequest(t, requests), req)
+
+	handlerErr = errors.New("submission failed")
+	if err := server.Submit(ctx, req); err == nil || !strings.Contains(err.Error(), handlerErr.Error()) {
+		t.Fatalf("Submit() error = %v, want %q", err, handlerErr)
+	}
+	assertSendRequest(t, receiveSendRequest(t, requests), req)
+}
+
+func TestSplitSubmitWithoutConnection(t *testing.T) {
+	err := (&Server{}).Submit(context.Background(), SendRequest{Recipient: "bob@outside.test"})
+	if err == nil {
+		t.Fatal("Submit() without connection succeeded, want an error")
+	}
+}
+
 func startTestSplitPair(t *testing.T, serverDeliver, clientDeliver func(context.Context, SendRequest) error, loggers ...*slog.Logger) (*Server, *Client) {
+	return startTestSplitPairWithCallbacks(t, serverDeliver, clientDeliver, nil, nil, loggers...)
+}
+
+func startTestSplitPairWithCallbacks(t *testing.T, serverDeliver, clientDeliver func(context.Context, SendRequest) error, clientSubmit func(context.Context, SendRequest) error, clientAuthenticate func(context.Context, string, string) (bool, error), loggers ...*slog.Logger) (*Server, *Client) {
 	t.Helper()
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -94,12 +164,14 @@ func startTestSplitPair(t *testing.T, serverDeliver, clientDeliver func(context.
 		logger = loggers[0]
 	}
 	ready := make(chan struct{}, 1)
+	serverConnected := make(chan struct{}, 1)
 	server := &Server{
-		Addr:      addr,
-		TLSConfig: &tls.Config{Certificates: []tls.Certificate{certificate}, MinVersion: tls.VersionTLS12},
-		Logger:    logger,
-		OnReady:   func() { ready <- struct{}{} },
-		Deliver:   serverDeliver,
+		Addr:        addr,
+		TLSConfig:   &tls.Config{Certificates: []tls.Certificate{certificate}, MinVersion: tls.VersionTLS12},
+		Logger:      logger,
+		OnReady:     func() { ready <- struct{}{} },
+		OnConnected: func() { serverConnected <- struct{}{} },
+		Deliver:     serverDeliver,
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	serverDone := make(chan error, 1)
@@ -116,20 +188,28 @@ func startTestSplitPair(t *testing.T, serverDeliver, clientDeliver func(context.
 
 	connected := make(chan struct{}, 1)
 	client := &Client{
-		Addr:      addr,
-		TLSConfig: &tls.Config{InsecureSkipVerify: true, MinVersion: tls.VersionTLS12},
-		Logger:    logger,
-		Deliver:   clientDeliver,
+		Addr:         addr,
+		TLSConfig:    &tls.Config{InsecureSkipVerify: true, MinVersion: tls.VersionTLS12},
+		Logger:       logger,
+		Deliver:      clientDeliver,
+		Submit:       clientSubmit,
+		Authenticate: clientAuthenticate,
 		OnConnected: func() {
 			connected <- struct{}{}
 		},
 	}
 	client.Start(ctx)
 	select {
-	case <-connected:
+	case <-serverConnected:
 	case <-time.After(5 * time.Second):
 		cancel()
 		t.Fatal("timed out waiting for split client connection")
+	}
+	select {
+	case <-connected:
+	case <-time.After(5 * time.Second):
+		cancel()
+		t.Fatal("timed out waiting for split server connection")
 	}
 
 	t.Cleanup(func() {

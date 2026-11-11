@@ -98,6 +98,9 @@ users:
 # is sent over the TLS link to the remote side, which relays it via standard
 # SMTP.  Inbound mail received at the remote side for a local mailbox is sent
 # back over the TLS link to the local side for storage.
+# SMTP submissions connected to the remote side authenticate against users on
+# the local side. External messages are submitted to the local side for DKIM
+# signing before the remote relays them to their destination.
 #
 # The role is inferred from the configuration:
 #   - split_listen set → this instance acts as the 'remote' side (accepts

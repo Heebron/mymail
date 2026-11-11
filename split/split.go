@@ -23,6 +23,13 @@
 //	TypeSendMail (0x01) — one side asks the other to deliver a message.
 //	Payload: [4 byte streamID][4 byte fromLen][from bytes][4 byte rcptLen][rcpt bytes][message bytes]
 //
+//	TypeSubmitMail (0x03) — the remote asks the local side to submit a message
+//	for processing and delivery.
+//	Payload: same as TypeSendMail.
+//
+//	TypeAuth (0x04) — the remote asks the local side to authenticate SMTP credentials.
+//	Payload: [4 byte streamID][4 byte usernameLen][username bytes][4 byte passwordLen][password bytes]
+//
 //	TypeAck (0x10) — positive acknowledgement for a delivered frame.
 //	Payload: [4 byte streamID]
 //
@@ -55,9 +62,14 @@ const (
 	TypeHandshake   byte = 0x00
 	TypeSendMail    byte = 0x01
 	TypeMailboxList byte = 0x02
+	TypeSubmitMail  byte = 0x03
+	TypeAuth        byte = 0x04
 	TypeAck         byte = 0x10
 	TypeErr         byte = 0x11
 )
+
+// ErrAuthRejected reports that the local side rejected SMTP credentials.
+var ErrAuthRejected = errors.New("authentication rejected")
 
 // SendRequest carries a single email that one side of the split link asks the
 // other side to deliver.
@@ -68,9 +80,8 @@ type SendRequest struct {
 }
 
 // link wraps a single TLS connection with multiplexed I/O.
-// A background reader loop dispatches incoming frames: SendMail frames are
-// delivered to the callback in goroutines, and Ack/Err frames are routed to
-// the pending channel for the matching stream ID.
+// A background reader loop dispatches incoming requests to callbacks and
+// routes Ack/Err frames to the pending channel for the matching stream ID.
 type link struct {
 	c      net.Conn
 	log    *slog.Logger
@@ -89,6 +100,10 @@ type link struct {
 
 	// Deliver callback for incoming SendMail frames (server-side).
 	deliver func(ctx context.Context, req SendRequest) error
+	// submit callback for incoming SubmitMail frames (client-side).
+	submit func(ctx context.Context, req SendRequest) error
+	// authenticate callback for incoming Auth frames (client-side).
+	authenticate func(ctx context.Context, username, password string) (bool, error)
 
 	// onMailboxList callback for incoming MailboxList frames (server-side).
 	onMailboxList func(addresses []string)
@@ -107,6 +122,8 @@ type response struct {
 
 func newLink(c net.Conn, log *slog.Logger, reader *bufio.Reader, writer *bufio.Writer,
 	deliver func(ctx context.Context, req SendRequest) error,
+	submit func(ctx context.Context, req SendRequest) error,
+	authenticate func(ctx context.Context, username, password string) (bool, error),
 	onMailboxList func(addresses []string),
 ) *link {
 	l := &link{
@@ -116,6 +133,8 @@ func newLink(c net.Conn, log *slog.Logger, reader *bufio.Reader, writer *bufio.W
 		writer:        writer,
 		pending:       make(map[uint32]chan response),
 		deliver:       deliver,
+		submit:        submit,
+		authenticate:  authenticate,
 		onMailboxList: onMailboxList,
 		done:          make(chan struct{}),
 	}
@@ -157,6 +176,24 @@ func (l *link) readLoop() {
 			}
 			l.log.Info("split SendMail received", "stream", streamID, "from", req.From, "to", req.Recipient, "bytes", len(req.Data))
 			go l.handleSendMail(streamID, req)
+		case TypeSubmitMail:
+			streamID, req, err := parseSendRequestWithStreamID(frameData)
+			if err != nil {
+				l.log.Warn("split malformed SubmitMail", "error", err)
+				go l.writeErr(streamID, "malformed SubmitMail")
+				continue
+			}
+			l.log.Info("split SubmitMail received", "stream", streamID, "from", req.From, "to", req.Recipient, "bytes", len(req.Data))
+			go l.handleSubmitMail(streamID, req)
+		case TypeAuth:
+			streamID, username, password, err := parseAuthRequestWithStreamID(frameData)
+			if err != nil {
+				l.log.Warn("split malformed Auth", "error", err)
+				go l.writeErr(streamID, "malformed Auth")
+				continue
+			}
+			l.log.Info("split Auth received", "stream", streamID, "username", username)
+			go l.handleAuthenticate(streamID, username, password)
 		case TypeAck:
 			streamID := parseStreamIDFromAck(frameData)
 			l.respondPending(streamID, response{ok: true})
@@ -200,6 +237,48 @@ func (l *link) handleSendMail(streamID uint32, req SendRequest) {
 	}
 }
 
+func (l *link) handleSubmitMail(streamID uint32, req SendRequest) {
+	if l.submit == nil {
+		err := errors.New("no submission handler")
+		l.log.Warn("split SubmitMail failed", "stream", streamID, "from", req.From, "to", req.Recipient, "error", err)
+		l.writeErr(streamID, err.Error())
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	if err := l.submit(ctx, req); err != nil {
+		l.log.Warn("split SubmitMail failed", "stream", streamID, "from", req.From, "to", req.Recipient, "error", err)
+		l.writeErr(streamID, err.Error())
+		return
+	}
+	l.log.Info("split SubmitMail completed", "stream", streamID, "from", req.From, "to", req.Recipient)
+	l.writeAck(streamID)
+}
+
+func (l *link) handleAuthenticate(streamID uint32, username, password string) {
+	if l.authenticate == nil {
+		err := errors.New("no authentication handler")
+		l.log.Warn("split Auth failed", "stream", streamID, "username", username, "error", err)
+		l.writeErr(streamID, err.Error())
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	ok, err := l.authenticate(ctx, username, password)
+	if err != nil {
+		l.log.Warn("split Auth failed", "stream", streamID, "username", username, "error", err)
+		l.writeErr(streamID, err.Error())
+		return
+	}
+	if !ok {
+		l.log.Info("split Auth rejected", "stream", streamID, "username", username)
+		l.writeErr(streamID, ErrAuthRejected.Error())
+		return
+	}
+	l.log.Info("split Auth accepted", "stream", streamID, "username", username)
+	l.writeAck(streamID)
+}
+
 func (l *link) writeAck(streamID uint32) {
 	data := make([]byte, 4)
 	binary.BigEndian.PutUint32(data, streamID)
@@ -232,48 +311,83 @@ func (l *link) respondPending(streamID uint32, resp response) {
 
 // sendRequest sends a SendMail frame and waits for the Ack/Err response.
 func (l *link) sendRequest(ctx context.Context, req SendRequest) error {
+	return l.sendMailRequest(ctx, TypeSendMail, "SendMail", req)
+}
+
+func (l *link) submitRequest(ctx context.Context, req SendRequest) error {
+	return l.sendMailRequest(ctx, TypeSubmitMail, "SubmitMail", req)
+}
+
+func (l *link) sendMailRequest(ctx context.Context, frameType byte, name string, req SendRequest) error {
 	started := time.Now()
-	streamID := l.nextStreamID.Add(1) - 1
+	streamID := uint32(0)
 	fail := func(err error) error {
-		l.log.Warn("split SendMail failed", "stream", streamID, "from", req.From, "to", req.Recipient, "error", err, "duration", time.Since(started))
+		l.log.Warn("split "+name+" failed", "stream", streamID, "from", req.From, "to", req.Recipient, "error", err, "duration", time.Since(started))
 		return err
 	}
+	var err error
+	streamID, err = l.request(ctx, frameType, name, func(id uint32) []byte {
+		return marshalSendRequestWithStreamID(id, req)
+	}, func(id uint32) {
+		l.log.Info("split "+name+" sent", "stream", id, "from", req.From, "to", req.Recipient, "bytes", len(req.Data))
+	})
+	if err != nil {
+		return fail(err)
+	}
+	l.log.Info("split "+name+" acknowledged", "stream", streamID, "to", req.Recipient, "duration", time.Since(started))
+	return nil
+}
+
+func (l *link) authenticateRequest(ctx context.Context, username, password string) (bool, error) {
+	_, err := l.request(ctx, TypeAuth, "Auth", func(streamID uint32) []byte {
+		return marshalAuthRequestWithStreamID(streamID, username, password)
+	}, nil)
+	if err != nil {
+		if err.Error() == ErrAuthRejected.Error() {
+			return false, ErrAuthRejected
+		}
+		return false, err
+	}
+	return true, nil
+}
+
+func (l *link) request(ctx context.Context, frameType byte, name string, payload func(uint32) []byte, onSent func(uint32)) (uint32, error) {
+	streamID := l.nextStreamID.Add(1) - 1
 	if l.closed.Load() == 1 {
-		return fail(errors.New("connection closed"))
+		return streamID, errors.New("connection closed")
 	}
 	ch := make(chan response, 1)
 	l.pendingMu.Lock()
-	if l.pending != nil {
-		l.pending[streamID] = ch
-	} else {
+	if l.pending == nil {
 		l.pendingMu.Unlock()
-		return fail(errors.New("connection closed"))
+		return streamID, errors.New("connection closed")
 	}
+	l.pending[streamID] = ch
 	l.pendingMu.Unlock()
 
-	payload := marshalSendRequestWithStreamID(streamID, req)
 	l.writeMu.Lock()
-	err := writeFrame(l.writer, TypeSendMail, payload)
+	err := writeFrame(l.writer, frameType, payload(streamID))
 	l.writeMu.Unlock()
 	if err != nil {
 		l.removePending(streamID)
-		return fail(fmt.Errorf("write SendMail: %w", err))
+		return streamID, fmt.Errorf("write %s: %w", name, err)
 	}
-	l.log.Info("split SendMail sent", "stream", streamID, "from", req.From, "to", req.Recipient, "bytes", len(req.Data))
+	if onSent != nil {
+		onSent(streamID)
+	}
 
 	select {
 	case resp, ok := <-ch:
 		if !ok {
-			return fail(errors.New("connection closed"))
+			return streamID, errors.New("connection closed")
 		}
-		if resp.ok {
-			l.log.Info("split SendMail acknowledged", "stream", streamID, "to", req.Recipient, "duration", time.Since(started))
-			return nil
+		if !resp.ok {
+			return streamID, errors.New(resp.err)
 		}
-		return fail(errors.New(resp.err))
+		return streamID, nil
 	case <-ctx.Done():
 		l.removePending(streamID)
-		return fail(ctx.Err())
+		return streamID, ctx.Err()
 	}
 }
 
@@ -480,6 +594,29 @@ func (s *Server) Send(ctx context.Context, req SendRequest) error {
 	return ln.sendRequest(ctx, req)
 }
 
+// Submit asks the local side to process and deliver a message through its
+// normal submission path.
+func (s *Server) Submit(ctx context.Context, req SendRequest) error {
+	s.activeMu.Lock()
+	ln := s.activeLn
+	s.activeMu.Unlock()
+	if ln == nil {
+		return errors.New("no active split connection")
+	}
+	return ln.submitRequest(ctx, req)
+}
+
+// Authenticate asks the local side to validate SMTP credentials.
+func (s *Server) Authenticate(ctx context.Context, username, password string) (bool, error) {
+	s.activeMu.Lock()
+	ln := s.activeLn
+	s.activeMu.Unlock()
+	if ln == nil {
+		return false, errors.New("no active split connection")
+	}
+	return ln.authenticateRequest(ctx, username, password)
+}
+
 func (s *Server) handleConn(c net.Conn) {
 	defer func() {
 		c.Close()
@@ -570,8 +707,7 @@ func (s *Server) handleConn(c net.Conn) {
 	}
 
 	// Create the multiplexed link wrapper and start the reader loop.
-	ln := newLink(c, s.Logger, reader, writer, s.Deliver, s.OnMailboxList)
-
+	ln := newLink(c, s.Logger, reader, writer, s.Deliver, nil, nil, s.OnMailboxList)
 	s.activeMu.Lock()
 	s.activeLn = ln
 	s.activeMu.Unlock()
@@ -609,16 +745,20 @@ func (s *Server) onDisconnected() {
 // when the connection is lost or not yet established.
 const reconnectInterval = 10 * time.Second
 
-// Client connects to the remote split server and provides a Send method for
-// forwarding email.  It maintains a persistent TLS connection with automatic
-// reconnection and multiplexed I/O so multiple messages can be in flight
-// simultaneously.
+// Client connects to the remote split server and provides Send, Submit, and
+// Authenticate operations. It maintains a persistent TLS connection with
+// automatic reconnection and multiplexed I/O so multiple requests can be in
+// flight simultaneously.
 type Client struct {
 	Addr      string
 	TLSConfig *tls.Config
 	Logger    *slog.Logger
 	// Deliver handles mail sent by the peer over the split connection.
 	Deliver func(ctx context.Context, req SendRequest) error
+	// Submit handles a submission request sent by the peer.
+	Submit func(ctx context.Context, req SendRequest) error
+	// Authenticate handles an SMTP authentication request sent by the peer.
+	Authenticate func(ctx context.Context, username, password string) (bool, error)
 
 	// OnConnected is called each time a connection is successfully established
 	// (after the handshake). It runs in the background reconnect goroutine.
@@ -812,7 +952,7 @@ func (c *Client) dialAndHandshake(ctx context.Context) (net.Conn, *link, error) 
 	}
 
 	// Create the multiplexed link wrapper and start the reader loop.
-	ln := newLink(conn, c.Logger, reader, writer, c.Deliver, nil)
+	ln := newLink(conn, c.Logger, reader, writer, c.Deliver, c.Submit, c.Authenticate, nil)
 	ln.start()
 
 	return conn, ln, nil
@@ -911,6 +1051,34 @@ func parseSendRequestWithStreamID(data []byte) (uint32, SendRequest, error) {
 		Recipient: rcpt,
 		Data:      msg,
 	}, nil
+}
+
+func marshalAuthRequestWithStreamID(streamID uint32, username, password string) []byte {
+	var buf bytes.Buffer
+	binary.Write(&buf, binary.BigEndian, streamID)
+	writeString(&buf, username)
+	writeString(&buf, password)
+	return buf.Bytes()
+}
+
+func parseAuthRequestWithStreamID(data []byte) (uint32, string, string, error) {
+	r := bytes.NewReader(data)
+	var streamID uint32
+	if err := binary.Read(r, binary.BigEndian, &streamID); err != nil {
+		return 0, "", "", fmt.Errorf("read streamID: %w", err)
+	}
+	username, err := readString(r)
+	if err != nil {
+		return streamID, "", "", fmt.Errorf("read username: %w", err)
+	}
+	password, err := readString(r)
+	if err != nil {
+		return streamID, "", "", fmt.Errorf("read password: %w", err)
+	}
+	if r.Len() != 0 {
+		return streamID, "", "", errors.New("unexpected trailing authentication data")
+	}
+	return streamID, username, password, nil
 }
 
 func parseStreamIDFromAck(data []byte) uint32 {

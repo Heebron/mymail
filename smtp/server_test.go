@@ -10,6 +10,7 @@ import (
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -537,6 +538,7 @@ func TestSMTPAuthenticationResponseDelayIsBounded(t *testing.T) {
 	var response string
 	start := time.Now()
 	err := server.authenticate(
+		context.Background(),
 		"PLAIN "+credentials,
 		bufio.NewReader(strings.NewReader("")),
 		func(format string, args ...any) error {
@@ -555,6 +557,119 @@ func TestSMTPAuthenticationResponseDelayIsBounded(t *testing.T) {
 	}
 	if response != "535 5.7.8 authentication credentials invalid" {
 		t.Fatalf("authentication response = %q", response)
+	}
+}
+
+func TestSMTPAuthenticateContextAllowsExternalRecipient(t *testing.T) {
+	server := &Server{
+		Hostname: "mail.example.test",
+		AuthenticateContext: func(_ context.Context, username, password string) (bool, error) {
+			return username == "alice@example.test" && password == "secret", nil
+		},
+		Resolve:     func(string) (string, bool) { return "", false },
+		LocalDomain: func(string) bool { return false },
+		SplitForward: func(context.Context, string, string, []byte, func(context.Context, string, string, []byte) error) error {
+			return nil
+		},
+		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}
+	serverConn, clientConn := net.Pipe()
+	defer clientConn.Close()
+	if err := clientConn.SetDeadline(time.Now().Add(5 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	go server.handle(context.Background(), serverConn)
+
+	reader := bufio.NewReader(clientConn)
+	readLine := func() string {
+		t.Helper()
+		line, err := reader.ReadString('\n')
+		if err != nil {
+			t.Fatal(err)
+		}
+		return strings.TrimRight(line, "\r\n")
+	}
+	write := func(line string) {
+		t.Helper()
+		if _, err := io.WriteString(clientConn, line+"\r\n"); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	readLine() // greeting
+	write("EHLO localhost")
+	for {
+		if strings.HasPrefix(readLine(), "250 ") {
+			break
+		}
+	}
+	credentials := base64.StdEncoding.EncodeToString([]byte("\x00alice@example.test\x00secret"))
+	write("AUTH PLAIN " + credentials)
+	if got := readLine(); !strings.HasPrefix(got, "235 ") {
+		t.Fatalf("AUTH response = %q, want 235", got)
+	}
+	write("MAIL FROM:<alice@example.test>")
+	if got := readLine(); !strings.HasPrefix(got, "250 ") {
+		t.Fatalf("MAIL response = %q", got)
+	}
+	write("RCPT TO:<bob@outside.test>")
+	if got := readLine(); !strings.HasPrefix(got, "250 ") {
+		t.Fatalf("RCPT response = %q, want accepted external recipient", got)
+	}
+}
+
+func TestSMTPAuthenticateContextErrorReturnsTemporaryFailure(t *testing.T) {
+	server := &Server{
+		AuthenticateContext: func(context.Context, string, string) (bool, error) {
+			return false, errors.New("split link unavailable")
+		},
+		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}
+	credentials := base64.StdEncoding.EncodeToString([]byte("\x00alice@example.test\x00secret"))
+	var response string
+	err := server.authenticate(
+		context.Background(),
+		"PLAIN "+credentials,
+		bufio.NewReader(strings.NewReader("")),
+		func(format string, args ...any) error {
+			response = fmt.Sprintf(format, args...)
+			return nil
+		},
+		new(bool),
+		"192.0.2.40:2525",
+		nil,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response != "454 4.7.0 authentication temporarily unavailable" {
+		t.Fatalf("authentication response = %q, want temporary failure", response)
+	}
+}
+
+func TestServerSubmitForwardsThroughDKIMSplitPath(t *testing.T) {
+	message := []byte("Subject: split submit\r\n\r\nbody")
+	var forwarded []byte
+	var server *Server
+	server = &Server{
+		Resolve: func(string) (string, bool) { return "", false },
+		DKIMSigner: func(data []byte) ([]byte, error) {
+			return append([]byte("DKIM-Signature: signed\r\n"), data...), nil
+		},
+		SplitForward: func(_ context.Context, _, _ string, data []byte, _ func(context.Context, string, string, []byte) error) error {
+			forwarded = server.SignDKIM("alice@example.test", "bob@outside.test", data)
+			return nil
+		},
+		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}
+	if err := server.Submit(context.Background(), "alice@example.test", "bob@outside.test", message); err != nil {
+		t.Fatalf("Submit() error = %v", err)
+	}
+	if !strings.HasPrefix(string(forwarded), "DKIM-Signature: signed\r\n") {
+		t.Fatalf("forwarded message = %q, want DKIM signature", forwarded)
+	}
+	if !bytes.HasSuffix(forwarded, message) {
+		t.Fatalf("forwarded message %q does not contain original message %q", forwarded, message)
 	}
 }
 

@@ -81,6 +81,9 @@ type Server struct {
 	DKIMSigner func(msg []byte) ([]byte, error)
 	// Authenticate verifies SMTP login credentials.
 	Authenticate Authenticator
+	// AuthenticateContext verifies SMTP credentials with the active server context.
+	// When set, it takes precedence over Authenticate.
+	AuthenticateContext func(ctx context.Context, username, password string) (bool, error)
 	// AuthLimiter applies shared authentication throttling when non-nil.
 	AuthLimiter *auth.Limiter
 	// Logger receives structured service logs. The default logger is used when
@@ -383,7 +386,7 @@ func (s *Server) handle(ctx context.Context, conn net.Conn) {
 				_ = write("530 5.7.0 Must issue STARTTLS first")
 				continue
 			}
-			if s.authenticate(argument, reader, write, &authenticated, remoteAddr, authConnection) != nil {
+			if s.authenticate(ctx, argument, reader, write, &authenticated, remoteAddr, authConnection) != nil {
 				return
 			}
 		case "MAIL":
@@ -609,6 +612,19 @@ func (s *Server) DeliverLocal(ctx context.Context, from, recipient string, data 
 	}
 }
 
+// Submit processes a message received by the remote SMTP server through the
+// local server's normal delivery and forwarding paths.
+func (s *Server) Submit(ctx context.Context, from, recipient string, data []byte) error {
+	if s.Resolve == nil {
+		return errors.New("local recipient resolver is not configured")
+	}
+	if _, ok := s.Resolve(recipient); ok {
+		return s.DeliverLocal(ctx, from, recipient, data)
+	}
+	tx := transaction{started: true, from: from, forward: []string{recipient}}
+	return s.deliverProcessed(ctx, tx, nil, data)
+}
+
 func (s *Server) forward(ctx context.Context, from, recipient string, data []byte) error {
 	return s.relayMX(ctx, from, recipient, s.SignDKIM(from, recipient, data))
 }
@@ -818,7 +834,7 @@ func recipientDomain(address string) (string, bool) {
 	return domain, true
 }
 
-func (s *Server) authenticate(argument string, reader *bufio.Reader, write func(string, ...any) error, authenticated *bool, remoteAddr string, authConnection *auth.Connection) error {
+func (s *Server) authenticate(ctx context.Context, argument string, reader *bufio.Reader, write func(string, ...any) error, authenticated *bool, remoteAddr string, authConnection *auth.Connection) error {
 	mechanism, initial, _ := strings.Cut(argument, " ")
 	mechanism = strings.ToUpper(mechanism)
 	username := ""
@@ -850,7 +866,7 @@ func (s *Server) authenticate(argument string, reader *bufio.Reader, write func(
 		logResult(false, reason)
 		return write(response)
 	}
-	if s.Authenticate == nil {
+	if s.Authenticate == nil && s.AuthenticateContext == nil {
 		logResult(false, "authentication unavailable")
 		return write("502 5.5.1 authentication unavailable")
 	}
@@ -903,7 +919,18 @@ func (s *Server) authenticate(argument string, reader *bufio.Reader, write func(
 	if err := checkThrottle(); err != nil {
 		return throttleResponse(err)
 	}
-	if !s.Authenticate(username, password) {
+	accepted := false
+	if s.AuthenticateContext != nil {
+		var err error
+		accepted, err = s.AuthenticateContext(ctx, username, password)
+		if err != nil {
+			logResult(false, "authentication temporarily unavailable")
+			return write("454 4.7.0 authentication temporarily unavailable")
+		}
+	} else {
+		accepted = s.Authenticate(username, password)
+	}
+	if !accepted {
 		if authConnection != nil {
 			time.Sleep(authConnection.Failure(username))
 		}
