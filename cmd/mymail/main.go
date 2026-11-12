@@ -213,7 +213,7 @@ func loadSplitTLSConfig(cfg *config.Config, logger *slog.Logger) (*tls.Config, e
 	return tlsConfig, nil
 }
 
-func registerConfiguredPlugins(processors *plugins.Chain, configured []config.PluginConfig) error {
+func registerConfiguredPlugins(processors *plugins.Chain, configured []config.PluginConfig, logger *slog.Logger) error {
 	if processors == nil {
 		return errors.New("nil processor chain")
 	}
@@ -222,6 +222,8 @@ func registerConfiguredPlugins(processors *plugins.Chain, configured []config.Pl
 		switch pluginConfig.Name {
 		case "spamd":
 			processor = plugins.NewSpamdClient("")
+		case "dmarc":
+			processor = plugins.NewDMARCReportProcessor(logger)
 		default:
 			return fmt.Errorf("unsupported plugin %q", pluginConfig.Name)
 		}
@@ -429,7 +431,7 @@ func main() {
 
 	processors := plugins.New()
 	processors.SetLogger(logger)
-	if err := registerConfiguredPlugins(processors, cfg.Plugins); err != nil {
+	if err := registerConfiguredPlugins(processors, cfg.Plugins, logger); err != nil {
 		fatal("plugin registration failed", "error", err)
 	}
 	ctx, cancel := context.WithCancel(context.Background())

@@ -377,6 +377,15 @@ plugins:
 Plugin setting values support the same environment expansion as other
 configuration values.
 
+MyMail includes the `spamd` plugin for SpamAssassin filtering and training, and
+the `dmarc` plugin for DMARC aggregate reports. The latter recognizes gzip,
+ZIP, and plain XML reports and adds a human-readable HTML attachment while
+leaving the original report intact. Configure `dmarc` after `spamd`, because
+adding the attachment changes the message body and invalidates the sender's
+DKIM body hash for any subsequent verifier. `max_report_size` and
+`max_message_size` optionally set positive byte limits (defaults: 10 MiB and
+25 MiB).
+
 `smtp_listen` always requires `STARTTLS` before authentication or submission.
 `tls_cert_file` and `tls_key_file` are required for that listener and enable
 `STARTTLS` on the IMAP `imap_listen` endpoint. Set `smtp_tls_listen` to add an

@@ -1,0 +1,468 @@
+From noreply@dmarc.yahoo.com Wed Nov 11 11:42:49 2026
+X-Spam-Checker-Version: SpamAssassin 4.0.1 (2024-03-25) on
+	mymail-0.mymail-headless.default.svc.cluster.local
+X-Spam-Level: *
+X-Spam-Status: No, score=1.0 required=5.0 tests=DKIM_SIGNED,DKIM_VALID,
+	FORGED_YAHOO_RCVD,NO_RELAYS,URIBL_BLOCKED,URIBL_DBL_BLOCKED_OPENDNS
+	autolearn=no autolearn_force=no version=4.0.1
+DKIM-Signature: v=1; a=rsa-sha256; c=relaxed/relaxed; d=yahoo.com; s=s2048;
+ t=1794397369; bh=jQp5KBmuRQfhNVDkoU+Hd4kw3fvzoMIpVw+WGKWDoo0=;
+ h=Date:From:To:Subject:From:Subject:Reply-To;
+ b=QEoVmxOwHH8eIGeRy2itUlDWQWjoV3LJc8lPJnU38FUVpv1+efqpJjs/5phGiJOLknyzVFUAVaLhtAgTKvH7OpxtEILz0BkjnHNToleGdErCidNS+hcP4UPQtXgldruwG93UN41yDxFuVsFAt04N6qM0fyTxxNeV1NM7V+enmKHoC3/Jwtbxlmx2ARXIc/bd6b1p/siaRwL9iQqhPyXbWVGgak3tfv789K2ysaSWb1bO95k3OugAQuyMH9BKhu0e9nlE1/ASXJtQY7of9ZwlRCYtV31euUh4OS/37MW4A1W0Xm4dW7fQzx1Q/vqz962/QSowsIfdSTLbTloNWJCCIA==
+X-SONIC-DKIM-SIGN: v=1; a=rsa-sha256; c=relaxed/relaxed; d=yahoo.com;
+ s=s2048; t=1794397369; bh=ILJddNMK552waO6Ag/q/5J5WCxkErxWSbw+bhdBgj2f=;
+ h=X-Sonic-MF:Date:From:To:Subject:From:Subject;
+ b=awRlA8pp+eP52CY2wGu7mgat8t9tfeN32FF5XMR9EIyxxB8EFdzmW/a2KRSGnyPFV4Fx/sL8rew15ueS1fgbNJTDDar9OE4IY9F2WuQty1yeM3BakbhigO42KDbChCtUS18Kghxr5Hqa258tEChw0RhpIm8cQ+g0lp1P/+qwnhyZbzzZltlKwmKZo25TdsCdgN9P/ECKJyb0VKG7Lv9wPamFbB5JE1CGEQyoO2IiSUxeHrbZpp92WBrHkBf99vENS8DXVSwDMTBIihekudpGNWsRR1D3aytt1mek0pTVj9VVEWLEldf2DveWvWpYTOQGjlAaF9M8NtvOqcBEdiEB8g==
+X-Sonic-MF: noreply@dmarc.yahoo.com
+X-Sonic-ID: 37e85789-aa20-4931-948b-02ebb02dbb89
+Received: from sonic.gate.mail.ne1.yahoo.com by
+ mail-asdoutdeli-p-cin-usea5-prod-sonicconsumer-svc-104 with HTTP; Wed, 11
+ Nov 2026 11:42:49 +0000
+Content-Transfer-Encoding: binary
+Content-Type: multipart/mixed; boundary="_----------=_179439731919581923145"
+MIME-Version: 1.0
+X-Mailer: MIME::Lite 3.033 (F2.85; T2.18; B3.16; Q3.16)
+Date: Wed, 11 Nov 2026 11:41:59 +0000
+From: noreply@dmarc.yahoo.com
+To: kpratt@thepratts.us
+Subject: Report Domain: thepratts.us Submitter: aol.com Report-ID:
+ <1794376173.750484>
+Message-Id: <1794397319.726866@dmarc.yahoo.com>
+X-Evolution-Source: vfolder
+
+This is a multi-part message in MIME format.
+
+--_----------=_179439731919581923145
+Content-Disposition: inline
+Content-Type: text/plain
+Content-Transfer-Encoding: 8bit
+
+This is an aggregate DMARC report from Yahoo for your domain "thepratts.us".
+
+This domain has a DMARC record set up. You are receiving this report because your email address is included in the 'rua' tag which is part of that DMARC record. DMARC is set up in the DNS settings of your domain.
+
+If you have questions about DMARC, please refer to the DMARC.org website, or contact your email service or hosting provider.
+
+If you no longer wish to receive these reports, or if you would like them to be sent to a different location, please update the 'rua' tag of the DMARC record of your domain. To do this please contact your email, domain or hosting provider. Please do not contact us as we will not be able to help you with updates to the DNS settings of your domain.
+
+Please note that this email address is not monitored, and you will not receive a response if you reply to this email. For any feedback or questions, please reach out to dmarchelp@yahooinc.com.
+--_----------=_179439731919581923145
+Content-Disposition: attachment; filename="aol.com!thepratts.us!1794268800!1794355199.xml.gz"
+Content-Transfer-Encoding: base64
+Content-Type: application/gzip; name="aol.com!thepratts.us!1794268800!1794355199.xml.gz"
+
+H4sIAIdU9GoAA41U23LCIBB9br/C8QOC0WjMDMX+Rp8ySFbDmAADpJe/LwhCajttn4Szmz0XdsSH
+93FYvII2XIqnZVmslgfy8IhPAN2Rsos7LxZYg5LatiNY2lFLr6CDpT63go5AXmgvJUbpHuswUj6Q
+bqSa9TCo5w/fxgUrmBwxCtXYGhl4R8q6qTb1rqw3Rb1dVfsKo1yM3U4EtJqK843KYUc4c3H9er3b
+71crjAKSGkDE4dtt2TSOX6R56G5govziGCs5cPbRquk4cNNDliOdFUFsD0pTa00xGTcygLGFdhc+
+Eo1RONxQo05X0P9GTBEhBWCkEsAsKb0ffwjqfhTiMmRSJ1FavmXvRk6aQcsVqbZF3RTrTbGudhhl
+PLUyOQlHiFE4JDxywisdJpdWlyo+AG6UNNy6HYrq58i80ZtX1Ph8cg5BoosgVHIYM6/3vO6JkkHM
+OxCWn7hb4/xlD7QD3Z60HO+eZl65Tfs+AtPJ9q0GMw12NvZe99+PH+zBAMxKTfzWO4+366wlUMUQ
+4iXn8IUXzzP6v4jfGWZLiL559/1xvTDK/w6fCeFHXkAEAAA=
+
+--_----------=_179439731919581923145--
+
+
+From noreply@dmarc.yahoo.com Wed Nov 11 11:42:49 2026
+X-Spam-Checker-Version: SpamAssassin 4.0.1 (2024-03-25) on
+	mymail-0.mymail-headless.default.svc.cluster.local
+X-Spam-Level: *
+X-Spam-Status: No, score=1.0 required=5.0 tests=DKIM_SIGNED,DKIM_VALID,
+	FORGED_YAHOO_RCVD,NO_RELAYS,URIBL_BLOCKED,URIBL_DBL_BLOCKED_OPENDNS
+	autolearn=no autolearn_force=no version=4.0.1
+DKIM-Signature: v=1; a=rsa-sha256; c=relaxed/relaxed; d=yahoo.com; s=s2048;
+ t=1794397369; bh=jQp5KBmuRQfhNVDkoU+Hd4kw3fvzoMIpVw+WGKWDoo0=;
+ h=Date:From:To:Subject:From:Subject:Reply-To;
+ b=QEoVmxOwHH8eIGeRy2itUlDWQWjoV3LJc8lPJnU38FUVpv1+efqpJjs/5phGiJOLknyzVFUAVaLhtAgTKvH7OpxtEILz0BkjnHNToleGdErCidNS+hcP4UPQtXgldruwG93UN41yDxFuVsFAt04N6qM0fyTxxNeV1NM7V+enmKHoC3/Jwtbxlmx2ARXIc/bd6b1p/siaRwL9iQqhPyXbWVGgak3tfv789K2ysaSWb1bO95k3OugAQuyMH9BKhu0e9nlE1/ASXJtQY7of9ZwlRCYtV31euUh4OS/37MW4A1W0Xm4dW7fQzx1Q/vqz962/QSowsIfdSTLbTloNWJCCIA==
+X-SONIC-DKIM-SIGN: v=1; a=rsa-sha256; c=relaxed/relaxed; d=yahoo.com;
+ s=s2048; t=1794397369; bh=ILJddNMK552waO6Ag/q/5J5WCxkErxWSbw+bhdBgj2f=;
+ h=X-Sonic-MF:Date:From:To:Subject:From:Subject;
+ b=awRlA8pp+eP52CY2wGu7mgat8t9tfeN32FF5XMR9EIyxxB8EFdzmW/a2KRSGnyPFV4Fx/sL8rew15ueS1fgbNJTDDar9OE4IY9F2WuQty1yeM3BakbhigO42KDbChCtUS18Kghxr5Hqa258tEChw0RhpIm8cQ+g0lp1P/+qwnhyZbzzZltlKwmKZo25TdsCdgN9P/ECKJyb0VKG7Lv9wPamFbB5JE1CGEQyoO2IiSUxeHrbZpp92WBrHkBf99vENS8DXVSwDMTBIihekudpGNWsRR1D3aytt1mek0pTVj9VVEWLEldf2DveWvWpYTOQGjlAaF9M8NtvOqcBEdiEB8g==
+X-Sonic-MF: noreply@dmarc.yahoo.com
+X-Sonic-ID: 37e85789-aa20-4931-948b-02ebb02dbb89
+Received: from sonic.gate.mail.ne1.yahoo.com by
+ mail-asdoutdeli-p-cin-usea5-prod-sonicconsumer-svc-104 with HTTP; Wed, 11
+ Nov 2026 11:42:49 +0000
+Content-Transfer-Encoding: binary
+Content-Type: multipart/mixed; boundary="_----------=_179439731919581923145"
+MIME-Version: 1.0
+X-Mailer: MIME::Lite 3.033 (F2.85; T2.18; B3.16; Q3.16)
+Date: Wed, 11 Nov 2026 11:41:59 +0000
+From: noreply@dmarc.yahoo.com
+To: kpratt@thepratts.us
+Subject: Report Domain: thepratts.us Submitter: aol.com Report-ID:
+ <1794376173.750484>
+Message-Id: <1794397319.726866@dmarc.yahoo.com>
+X-Evolution-Source: vfolder
+
+This is a multi-part message in MIME format.
+
+--_----------=_179439731919581923145
+Content-Disposition: inline
+Content-Type: text/plain
+Content-Transfer-Encoding: 8bit
+
+This is an aggregate DMARC report from Yahoo for your domain "thepratts.us".
+
+This domain has a DMARC record set up. You are receiving this report because your email address is included in the 'rua' tag which is part of that DMARC record. DMARC is set up in the DNS settings of your domain.
+
+If you have questions about DMARC, please refer to the DMARC.org website, or contact your email service or hosting provider.
+
+If you no longer wish to receive these reports, or if you would like them to be sent to a different location, please update the 'rua' tag of the DMARC record of your domain. To do this please contact your email, domain or hosting provider. Please do not contact us as we will not be able to help you with updates to the DNS settings of your domain.
+
+Please note that this email address is not monitored, and you will not receive a response if you reply to this email. For any feedback or questions, please reach out to dmarchelp@yahooinc.com.
+--_----------=_179439731919581923145
+Content-Disposition: attachment; filename="aol.com!thepratts.us!1794268800!1794355199.xml.gz"
+Content-Transfer-Encoding: base64
+Content-Type: application/gzip; name="aol.com!thepratts.us!1794268800!1794355199.xml.gz"
+
+H4sIAIdU9GoAA41U23LCIBB9br/C8QOC0WjMDMX+Rp8ySFbDmAADpJe/LwhCajttn4Szmz0XdsSH
+93FYvII2XIqnZVmslgfy8IhPAN2Rsos7LxZYg5LatiNY2lFLr6CDpT63go5AXmgvJUbpHuswUj6Q
+bqSa9TCo5w/fxgUrmBwxCtXYGhl4R8q6qTb1rqw3Rb1dVfsKo1yM3U4EtJqK843KYUc4c3H9er3b
+71crjAKSGkDE4dtt2TSOX6R56G5govziGCs5cPbRquk4cNNDliOdFUFsD0pTa00xGTcygLGFdhc+
+Eo1RONxQo05X0P9GTBEhBWCkEsAsKb0ffwjqfhTiMmRSJ1FavmXvRk6aQcsVqbZF3RTrTbGudhhl
+PLUyOQlHiFE4JDxywisdJpdWlyo+AG6UNNy6HYrq58i80ZtX1Ph8cg5BoosgVHIYM6/3vO6JkkHM
+OxCWn7hb4/xlD7QD3Z60HO+eZl65Tfs+AtPJ9q0GMw12NvZe99+PH+zBAMxKTfzWO4+366wlUMUQ
+4iXn8IUXzzP6v4jfGWZLiL559/1xvTDK/w6fCeFHXkAEAAA=
+
+--_----------=_179439731919581923145--
+
+
+From noreply-dmarc-support@google.com Thu Nov 12 02:58:50 2026
+X-Spam-Checker-Version: SpamAssassin 4.0.1 (2024-03-25) on
+	mymail-0.mymail-headless.default.svc.cluster.local
+X-Spam-Level: 
+X-Spam-Status: No, score=-7.5 required=5.0 tests=DATE_IN_PAST_06_12,
+	DKIMWL_WL_MED,DKIM_SIGNED,DKIM_VALID,DKIM_VALID_AU,NO_RELAYS,
+	TVD_SPACE_RATIO,URIBL_BLOCKED,URIBL_DBL_BLOCKED_OPENDNS,
+	USER_IN_DEF_DKIM_WL autolearn=ham autolearn_force=no version=4.0.1
+Received: by mail-qt1-f201.google.com with SMTP id
+ d75a77b69052e-5339739b343so83342231cf.2 for <kpratt@thepratts.us>; Thu, 12
+ Nov 2026 02:58:50 -0800 (PST)
+DKIM-Signature: v=1; a=rsa-sha256; c=relaxed/relaxed; d=google.com;
+ s=20260707; t=1794481130; x=1795085930; darn=thepratts.us;
+ h=content-transfer-encoding:content-disposition:content-type:to:from
+ :subject:message-id:date:mime-version:from:to:cc:subject:date
+ :message-id:reply-to:content-type;
+ bh=EeUBQX1P0xp2/c9jcPp/B9KuK1GrpFLZf9E4lh0xsHg=;
+ b=D/Ck0hNVCvwS6kCj7yIfz/3815TMIpKpDTPdVDP49ZE1MumqHs6sugcrdSb06LcXII
+ J97I0cE8PZraSTdLODlhXw1RhOjDG2N22JhXbVgkeLsnePeWWNuDg21qstZUZk1zgPar
+ odfc2PkZBOxVmX9Ylcat49w5QJ2ry58mW0/1DvOUcUWYO4R4pVb/KEBH/9+bTDxPPNlc
+ yY7c/Q840PkB2Bqx3ppE4cRw9MH8s0BFdtgZdIPZwOu+/cnwoaTyqm0VPNr6HZ3JFKid
+ Pja7xfrik0tUO74VqKbWobQo0THwuFxxyYki5KzEeDmfzg5QxoB2NCNB4TbRFD12UTmQ pxLA==
+X-Google-DKIM-Signature: v=1; a=rsa-sha256; c=relaxed/relaxed; d=1e100.net;
+ s=20260707; t=1794481130; x=1795085930;
+ h=content-transfer-encoding:content-disposition:content-type:to:from
+ :subject:message-id:date:mime-version:x-gm-message-state:from:to:cc
+ :subject:date:message-id:reply-to:content-type;
+ bh=EeUBQX1P0xp2/c9jcPp/B9KuK1GrpFLZf9E4lh0xsHg=;
+ b=ATSvap70CQrQ41+IoxgKirEY/5fpBDysGb645Rmc+4iQ6NYFmPFNqIQl8ZILPfh7O1
+ 59zIgN5gYxeQLX2ysSoteuxqNwtrJJPA22LbEmUxcepsrLCpVQaVJ7Ynlr4EwdNSyinw
+ 0AJWoOc+gVK8kbi4eNmlb78YIyI/GPS9/xfVt7XyS8r2W0z6i5ZkN4PNzgNJWf9Ot/4D
+ ApCDtZ1jO36tlulKZtJGddwEEKgFdsuKVPSr5D3JhjB61qTweW09LzyDbOYkC6aMrwYW
+ UM44h/X9mkXAwHnhLVdIGo6jqfbdRyeU9cJbeHt/P+XcD1VqfrevAqxMBfO9BdRrF9Hc pjug==
+X-Gm-Message-State:
+ APuU4Z+mkuxQ/8Jg0UHeiMcnaS+UeYIZr+aH9g4eFPuFpsiTKYzutNCh
+ hQ55dAWBVNM7wGSZbPCprM0lDbCxnnXSL5MnXulxFALuIRZJ5QEIqTtW7GSXH60H4Pc7S+0=
+MIME-Version: 1.0
+X-Received: by 2002:ac8:5ad6:0:b0:535:a5f9:752e with SMTP id
+ d75a77b69052e-556c1c56205mr80691791cf.77.1794481130386; Thu, 12 Nov 2026
+ 02:58:50 -0800 (PST)
+Date: Wed, 11 Nov 2026 15:59:59 -0800
+Message-ID: <5993093286666256774@google.com>
+Subject: Report domain: thepratts.us Submitter: google.com Report-ID:
+ 5993093286666256774
+From: noreply-dmarc-support@google.com
+To: kpratt@thepratts.us
+Content-Type: application/zip; 
+	name="google.com!thepratts.us!1794355200!1794441599.zip"
+Content-Disposition: attachment; 
+	filename="google.com!thepratts.us!1794355200!1794441599.zip"
+Content-Transfer-Encoding: base64
+X-Evolution-Source: vfolder
+
+UEsDBAoAAAAIAHNRbF00I2cLNgIAADwHAAAxAAAAZ29vZ2xlLmNvbSF0aGVwcmF0dHMudXMhMTc5
+NDM1NTIwMCExNzk0NDQxNTk5LnhtbNVVy27bMBC85ysE3yNKsiRbxobpqV/QngWaWtlEJJIgqTz+
+vqBJyaoboEHQoujJ3NnZ13gMw+PrOCTPaKxQ8mGTp9kmQclVJ+TpYfP929f7/SZ5pHfQI3ZHxp/o
+XZJA5NM8zYDMgU8Y1Mq4dkTHOuaYx5IElDm1ko1IT0qdBky5GoEsYODgyMRApTKoh7f7bmSG39tJ
++3Zf1mWBF2tenWEtV9Ix7lohe0XPzml7ICSWptdSwgiT9gUNKcq6rvYZkHfqQ+N4huho1TTbrNkW
++7qu66Kqd7sSyDUd6B1z2BomT/GYJIEjnoSk+a4pt1VVZBmQgMx5lN0lW5Z51TRAfByakZ+7LdPW
+moJWg+BvrZ6Og7BnXBZRIxOSujNqw5yz6WSBRDAwWPckRmqAhEcEre4vmP8MkKZSSQSiY2xnwM6I
+5o7m/jD/CJCcSfJCAvLemmCQKzNvbNTLoolVk+HYCk3LKt01abFNi7IGcsVnJleTdDQHEh4zHMfh
+Mxsm5mZVgjLCamWF80YNO66RFc+ropn1ui0CRQX6mFhUWp14MxPIchiIDqUTvUBjl7Izsg5N2xs1
+3nxb60xs9UsDYJM7twbtNLhrz5t9f+uF6HTfJB4Wg9XNOCB3ylD/owOyhMv165kXhf7g/JXQQG4v
+9uTZRh9xVJFl+aGq9oe+y/JDcTyWh0PxD6zVX4R8x1oh8V9Zi6uRM+u8NyyaZ8Exleg+b7IiK/I8
+y/fsbzrNqt4FrT/lNiDXP8IfUEsBAgoACgAAAAgAc1FsXTQjZws2AgAAPAcAADEAAAAAAAAAAAAA
+AAAAAAAAAGdvb2dsZS5jb20hdGhlcHJhdHRzLnVzITE3OTQzNTUyMDAhMTc5NDQ0MTU5OS54bWxQ
+SwUGAAAAAAEAAQBfAAAAhQIAAAAA
+
+From noreply-dmarc-support@google.com Thu Nov 12 03:10:27 2026
+X-Spam-Checker-Version: SpamAssassin 4.0.1 (2024-03-25) on
+	mymail-0.mymail-headless.default.svc.cluster.local
+X-Spam-Level: 
+X-Spam-Status: No, score=-7.5 required=5.0 tests=DATE_IN_PAST_06_12,
+	DKIMWL_WL_MED,DKIM_SIGNED,DKIM_VALID,DKIM_VALID_AU,NO_RELAYS,
+	TVD_SPACE_RATIO,URIBL_BLOCKED,URIBL_DBL_BLOCKED_OPENDNS,
+	USER_IN_DEF_DKIM_WL autolearn=unavailable autolearn_force=no
+	version=4.0.1
+Received: by mail-qv1-f74.google.com with SMTP id
+ 6a1803df08f44-91f0938c499so39039856d6.2 for <kpratt@thepratts.us>; Thu, 12
+ Nov 2026 03:10:27 -0800 (PST)
+DKIM-Signature: v=1; a=rsa-sha256; c=relaxed/relaxed; d=google.com;
+ s=20260707; t=1794481826; x=1795086626; darn=thepratts.us;
+ h=content-transfer-encoding:content-disposition:content-type:to:from
+ :subject:message-id:date:mime-version:from:to:cc:subject:date
+ :message-id:reply-to:content-type;
+ bh=EeUBQX1P0xp2/c9jcPp/B9KuK1GrpFLZf9E4lh0xsHg=;
+ b=Kd+0RgW2gKb3j2DJMEv8276bgHAUb1Qsc9DDXsVoz7IGrAdC7PkqrrI7DbF29uIPMi
+ KvTYcAdEe9R0r4UtU3kGxFwrR2qn5GgRfrHbnXTG4Iu7JjRK8LFGvB9PbLJPzPxOlDU3
+ 1LrYVQ1Sttmczoc9gS9y82osaYUj7nbEl4qR+422hJHX3+wKKAHgZ8RYN3ZvsgHZ44SG
+ cMM44ph+MfhMPm1eXp1MJRK9yCR2sFAxCH4qNxDGUpx+MtgtqbqQYZpZyYOiz3u4aYi3
+ ZDl3Y3EDaMdI9Xmo+D5l7smUMcrB8mD9qxneKy72cAPYL5vKia9u6q1Yu542+MbC0Zje KVvA==
+X-Google-DKIM-Signature: v=1; a=rsa-sha256; c=relaxed/relaxed; d=1e100.net;
+ s=20260707; t=1794481826; x=1795086626;
+ h=content-transfer-encoding:content-disposition:content-type:to:from
+ :subject:message-id:date:mime-version:x-gm-message-state:from:to:cc
+ :subject:date:message-id:reply-to:content-type;
+ bh=EeUBQX1P0xp2/c9jcPp/B9KuK1GrpFLZf9E4lh0xsHg=;
+ b=IuneUTFVywdwS+QmBdTO36OzOyjbJaOvgJQCoRyWIeMRmgwSX3sQCTFTSh03KPNWEV
+ tfrKE2g1AlsRcVkqaF/NYUpTvzbAhQoNDJRegCYIzOOd4TWN9P2hDruyrTimdUzmsTyh
+ /6GYAWvVpqxyStBvndsDorcvkd3/S/tQhAaIC21lyGClLjmP8vgKqQ38EA61fKDezoj4
+ +L6OX5l1TeehiAm3tEdRQBIHGIEUnLMwAiRYJ5833ZWPEE7cWnyOE1UewlGigqu4VWi7
+ AU4Q2CPpxdzpkYJh8BlM05YrH798Fevw1HesATAbbyJFliT3av88wwDqaozvICgNdQE+ gsxw==
+X-Gm-Message-State:
+ APuU4Z+FPb7ESvSk9cb9ABLRap7Csg3Ii29B3khp+74+WdICUyPubbgo
+ 3yOQVuQpTumfV3dxY0Rku9zdqsvInm1t5B+8Rl/rs1pCR729/oPni+dwctiHKy0WnRfbqXQ=
+MIME-Version: 1.0
+X-Received: by 2002:ad4:5d68:0:b0:91b:efa3:a608 with SMTP id
+ 6a1803df08f44-91f0418a960mr91375776d6.44.1794481826816; Thu, 12 Nov 2026
+ 03:10:26 -0800 (PST)
+Date: Wed, 11 Nov 2026 15:59:59 -0800
+Message-ID: <5993093286666256774@google.com>
+Subject: Report domain: thepratts.us Submitter: google.com Report-ID:
+ 5993093286666256774
+From: noreply-dmarc-support@google.com
+To: kpratt@thepratts.us
+Content-Type: application/zip; 
+	name="google.com!thepratts.us!1794355200!1794441599.zip"
+Content-Disposition: attachment; 
+	filename="google.com!thepratts.us!1794355200!1794441599.zip"
+Content-Transfer-Encoding: base64
+X-Evolution-Source: vfolder
+
+UEsDBAoAAAAIAHNRbF00I2cLNgIAADwHAAAxAAAAZ29vZ2xlLmNvbSF0aGVwcmF0dHMudXMhMTc5
+NDM1NTIwMCExNzk0NDQxNTk5LnhtbNVVy27bMBC85ysE3yNKsiRbxobpqV/QngWaWtlEJJIgqTz+
+vqBJyaoboEHQoujJ3NnZ13gMw+PrOCTPaKxQ8mGTp9kmQclVJ+TpYfP929f7/SZ5pHfQI3ZHxp/o
+XZJA5NM8zYDMgU8Y1Mq4dkTHOuaYx5IElDm1ko1IT0qdBky5GoEsYODgyMRApTKoh7f7bmSG39tJ
++3Zf1mWBF2tenWEtV9Ix7lohe0XPzml7ICSWptdSwgiT9gUNKcq6rvYZkHfqQ+N4huho1TTbrNkW
++7qu66Kqd7sSyDUd6B1z2BomT/GYJIEjnoSk+a4pt1VVZBmQgMx5lN0lW5Z51TRAfByakZ+7LdPW
+moJWg+BvrZ6Og7BnXBZRIxOSujNqw5yz6WSBRDAwWPckRmqAhEcEre4vmP8MkKZSSQSiY2xnwM6I
+5o7m/jD/CJCcSfJCAvLemmCQKzNvbNTLoolVk+HYCk3LKt01abFNi7IGcsVnJleTdDQHEh4zHMfh
+Mxsm5mZVgjLCamWF80YNO66RFc+ropn1ui0CRQX6mFhUWp14MxPIchiIDqUTvUBjl7Izsg5N2xs1
+3nxb60xs9UsDYJM7twbtNLhrz5t9f+uF6HTfJB4Wg9XNOCB3ylD/owOyhMv165kXhf7g/JXQQG4v
+9uTZRh9xVJFl+aGq9oe+y/JDcTyWh0PxD6zVX4R8x1oh8V9Zi6uRM+u8NyyaZ8Exleg+b7IiK/I8
+y/fsbzrNqt4FrT/lNiDXP8IfUEsBAgoACgAAAAgAc1FsXTQjZws2AgAAPAcAADEAAAAAAAAAAAAA
+AAAAAAAAAGdvb2dsZS5jb20hdGhlcHJhdHRzLnVzITE3OTQzNTUyMDAhMTc5NDQ0MTU5OS54bWxQ
+SwUGAAAAAAEAAQBfAAAAhQIAAAAA
+
+From noreply-dmarc-support@google.com Thu Nov 12 03:50:54 2026
+X-Spam-Checker-Version: SpamAssassin 4.0.1 (2024-03-25) on
+	mymail-0.mymail-headless.default.svc.cluster.local
+X-Spam-Level: 
+X-Spam-Status: No, score=-7.5 required=5.0 tests=DATE_IN_PAST_06_12,
+	DKIMWL_WL_MED,DKIM_SIGNED,DKIM_VALID,DKIM_VALID_AU,NO_RELAYS,
+	TVD_SPACE_RATIO,URIBL_BLOCKED,URIBL_DBL_BLOCKED_OPENDNS,
+	USER_IN_DEF_DKIM_WL autolearn=unavailable autolearn_force=no
+	version=4.0.1
+Received: by mail-qt1-f201.google.com with SMTP id
+ d75a77b69052e-532f343a55bso78097311cf.3 for <kpratt@thepratts.us>; Thu, 12
+ Nov 2026 03:50:54 -0800 (PST)
+DKIM-Signature: v=1; a=rsa-sha256; c=relaxed/relaxed; d=google.com;
+ s=20260707; t=1794484254; x=1795089054; darn=thepratts.us;
+ h=content-transfer-encoding:content-disposition:content-type:to:from
+ :subject:message-id:date:mime-version:from:to:cc:subject:date
+ :message-id:reply-to:content-type;
+ bh=EeUBQX1P0xp2/c9jcPp/B9KuK1GrpFLZf9E4lh0xsHg=;
+ b=TuVDUjm+W0yTtlTLHn1YKlgw+c0Kyg6DZiiEkC8KjwTPuHm1xn8JsyrjvV9qS8CkID
+ xsecOFWCrGwJ4AnGu/3Wfx46iJfaYgOpJ9MNd+BKXo0HulsTVr80bkymuWP+9Q6wqcYJ
+ cMcbS/reOWFHugVHMLiODGPAQb2FnVoD099n/oZmm+l2linloKyzt6YevR77sUMsd/6o
+ mCefvWnCubhPKqEu2O1KRLjj0cBd/fr8VjlZVhGMicNzgffTuFq2emUvFqAZRpBOAGVk
+ 7DYiwxDpy+11+AAb63vxnfzecuRK3xLzJ+gTXIoYJKFGVtU79qM+wvY+dMu562wdXFWN e8Mw==
+X-Google-DKIM-Signature: v=1; a=rsa-sha256; c=relaxed/relaxed; d=1e100.net;
+ s=20260707; t=1794484254; x=1795089054;
+ h=content-transfer-encoding:content-disposition:content-type:to:from
+ :subject:message-id:date:mime-version:x-gm-message-state:from:to:cc
+ :subject:date:message-id:reply-to:content-type;
+ bh=EeUBQX1P0xp2/c9jcPp/B9KuK1GrpFLZf9E4lh0xsHg=;
+ b=SkHGcZkFysI5IpWlAZqGtQcKs2Jgyn5wXwAddgUTLLnax+I7tda+j8CFqWDCbbuOiR
+ T3Nsz461IIu+jo6W60PG9tLUkM/3L+Fm/Z0ULALhjghq56REnMMSAGWe7uQ++0w2bKJI
+ ROPBCGPDA/mE80Yi68NrP3lgib6Lx/ytumQe3ucQPjzLIU+JIlte8/ZIT6exPh0AVCMd
+ tXxwS/pqU/x9LZzz142j8ljOODR3+nIVBRVef02Z2Av1Uxnmsm5Ayp6QAtvtPvnNmLV0
+ re5AJSv6hjEkzzNmgcO2mILmYKLgwmz/OtlTwUN2qMvmYcr0e52NzoRNZnMAeIivZt60 LylQ==
+X-Gm-Message-State:
+ APuU4Z8ew1uSn/EuoPp0HR5s31OIefV7CQ0WfvEKYWdw+YZeV21Qpidt
+ pCf+LDQEjb5Dhj+QfO75vT66iS5o4RO5NX2dRTL2Nb4xvcRSjXzhbG/RNwq3Wp2mIfEXaiM=
+MIME-Version: 1.0
+X-Received: by 2002:a05:622a:1210:b0:536:4482:2c5d with SMTP id
+ d75a77b69052e-556c001736bmr90502901cf.19.1794484254055; Thu, 12 Nov 2026
+ 03:50:54 -0800 (PST)
+Date: Wed, 11 Nov 2026 15:59:59 -0800
+Message-ID: <5993093286666256774@google.com>
+Subject: Report domain: thepratts.us Submitter: google.com Report-ID:
+ 5993093286666256774
+From: noreply-dmarc-support@google.com
+To: kpratt@thepratts.us
+Content-Type: application/zip; 
+	name="google.com!thepratts.us!1794355200!1794441599.zip"
+Content-Disposition: attachment; 
+	filename="google.com!thepratts.us!1794355200!1794441599.zip"
+Content-Transfer-Encoding: base64
+X-Evolution-Source: vfolder
+
+UEsDBAoAAAAIAHNRbF00I2cLNgIAADwHAAAxAAAAZ29vZ2xlLmNvbSF0aGVwcmF0dHMudXMhMTc5
+NDM1NTIwMCExNzk0NDQxNTk5LnhtbNVVy27bMBC85ysE3yNKsiRbxobpqV/QngWaWtlEJJIgqTz+
+vqBJyaoboEHQoujJ3NnZ13gMw+PrOCTPaKxQ8mGTp9kmQclVJ+TpYfP929f7/SZ5pHfQI3ZHxp/o
+XZJA5NM8zYDMgU8Y1Mq4dkTHOuaYx5IElDm1ko1IT0qdBky5GoEsYODgyMRApTKoh7f7bmSG39tJ
++3Zf1mWBF2tenWEtV9Ix7lohe0XPzml7ICSWptdSwgiT9gUNKcq6rvYZkHfqQ+N4huho1TTbrNkW
++7qu66Kqd7sSyDUd6B1z2BomT/GYJIEjnoSk+a4pt1VVZBmQgMx5lN0lW5Z51TRAfByakZ+7LdPW
+moJWg+BvrZ6Og7BnXBZRIxOSujNqw5yz6WSBRDAwWPckRmqAhEcEre4vmP8MkKZSSQSiY2xnwM6I
+5o7m/jD/CJCcSfJCAvLemmCQKzNvbNTLoolVk+HYCk3LKt01abFNi7IGcsVnJleTdDQHEh4zHMfh
+Mxsm5mZVgjLCamWF80YNO66RFc+ropn1ui0CRQX6mFhUWp14MxPIchiIDqUTvUBjl7Izsg5N2xs1
+3nxb60xs9UsDYJM7twbtNLhrz5t9f+uF6HTfJB4Wg9XNOCB3ylD/owOyhMv165kXhf7g/JXQQG4v
+9uTZRh9xVJFl+aGq9oe+y/JDcTyWh0PxD6zVX4R8x1oh8V9Zi6uRM+u8NyyaZ8Exleg+b7IiK/I8
+y/fsbzrNqt4FrT/lNiDXP8IfUEsBAgoACgAAAAgAc1FsXTQjZws2AgAAPAcAADEAAAAAAAAAAAAA
+AAAAAAAAAGdvb2dsZS5jb20hdGhlcHJhdHRzLnVzITE3OTQzNTUyMDAhMTc5NDQ0MTU5OS54bWxQ
+SwUGAAAAAAEAAQBfAAAAhQIAAAAA
+
+From noreply@dmarc.yahoo.com Thu Nov 12 10:11:09 2026
+X-Spam-Checker-Version: SpamAssassin 4.0.1 (2024-03-25) on
+	mymail-0.mymail-headless.default.svc.cluster.local
+X-Spam-Level: *
+X-Spam-Status: No, score=1.0 required=5.0 tests=DKIM_SIGNED,DKIM_VALID,
+	FORGED_YAHOO_RCVD,NO_RELAYS,URIBL_BLOCKED,URIBL_DBL_BLOCKED_OPENDNS
+	autolearn=no autolearn_force=no version=4.0.1
+DKIM-Signature: v=1; a=rsa-sha256; c=relaxed/relaxed; d=yahoo.com; s=s2048;
+ t=1794478269; bh=bwIlyq9wvrpKO4Ma7i4Z2tgdx1MnGEvrEE0cInE8gwg=;
+ h=Date:From:To:Subject:From:Subject:Reply-To;
+ b=nGRppwuDO4mBRXdGp69keunZiF1ve2V84/yUPuX9vikgJdZ/kJN2IYQC8b0yRJwmg8d2iwjPz5wGtJgU3DVqewJsaa9XbV6328xrQjY5TXPN1YZpCCdA1bA3Z9MHnVuaHtQaz3zlzVuItrj7iCu2B4tMGhxpMpAgxL42JoGV2Zdc0n3A/Zr4RioEUzlh27LVPS+MH+cADlDxLm2Hl/zMlREotkuyERiIauq6/PLFlGsp0yLvXpDV1Wo+vwoYGxzCgB6xigx5NmuoV4ob2Asi8h89V2eKYPPCgooCIJXsTqVKqK2Pzhkvrgw2Kir+iqbwuDSg6MyzGQZ/N4++uAoGFg==
+X-SONIC-DKIM-SIGN: v=1; a=rsa-sha256; c=relaxed/relaxed; d=yahoo.com;
+ s=s2048; t=1794478269; bh=tkcq+NTU3ynzbk4R8RJdl/5Y7Z/Tu9FHIfPjhjSNO+h=;
+ h=X-Sonic-MF:Date:From:To:Subject:From:Subject;
+ b=F7HdIUoPrKwqCazP0Gp+xuGGeHVYkDA7Z2FJCv7FrGvdcPOqimD0WnzLJFEn7rP4Pgcpqmful9oH+UoHB4mRSiyRa2AW2aQWNWcQ2UOc2GBnBlwlk4Bz/ssq3a0dC13AfIdiXDOXQBT8VTGfbWZjA0LQzrpBfqNTk1KmlM7UenwhnT7wtrYTf65NEbln++msA8vR2N0StAGFQGA0oW5ErLyok94jafYxDvAS1eFG470nbhkDsOtkDPN2PSE7K7iFb9K0IEYP7bOobWC2a9KAATmPbYodj0dvGjAtWMgnQ/OkY6gKFBVk5M78JY6Hz01pmV5h0YagX9G2UTM+t3dGJQ==
+X-Sonic-MF: noreply@dmarc.yahoo.com
+X-Sonic-ID: eeaef8a5-df98-4ccc-8328-9a3c0125be7e
+Received: from sonic.gate.mail.ne1.yahoo.com by
+ mail-asdoutdeli-p-cin-usea5-prod-sonicconsumer-svc-102 with HTTP; Thu, 12
+ Nov 2026 10:11:09 +0000
+Content-Transfer-Encoding: binary
+Content-Type: multipart/mixed; boundary="_----------=_179447826913822121787"
+MIME-Version: 1.0
+X-Mailer: MIME::Lite 3.033 (F2.85; T2.18; B3.16; Q3.16)
+Date: Thu, 12 Nov 2026 10:11:09 +0000
+From: noreply@dmarc.yahoo.com
+To: ken@thepratts.us
+Subject: Report Domain: thepratts.us Submitter: yahoo.com Report-ID:
+ <1794462583.260632>
+Message-Id: <1794478269.356072@dmarc.yahoo.com>
+X-Evolution-Source: vfolder
+
+This is a multi-part message in MIME format.
+
+--_----------=_179447826913822121787
+Content-Disposition: inline
+Content-Type: text/plain
+Content-Transfer-Encoding: 8bit
+
+This is an aggregate DMARC report from Yahoo for your domain "thepratts.us".
+
+This domain has a DMARC record set up. You are receiving this report because your email address is included in the 'rua' tag which is part of that DMARC record. DMARC is set up in the DNS settings of your domain.
+
+If you have questions about DMARC, please refer to the DMARC.org website, or contact your email service or hosting provider.
+
+If you no longer wish to receive these reports, or if you would like them to be sent to a different location, please update the 'rua' tag of the DMARC record of your domain. To do this please contact your email, domain or hosting provider. Please do not contact us as we will not be able to help you with updates to the DNS settings of your domain.
+
+Please note that this email address is not monitored, and you will not receive a response if you reply to this email. For any feedback or questions, please reach out to dmarchelp@yahooinc.com.
+--_----------=_179447826913822121787
+Content-Disposition: attachment; filename="yahoo.com!thepratts.us!1794355200!1794441599.xml.gz"
+Content-Transfer-Encoding: base64
+Content-Type: application/gzip; name="yahoo.com!thepratts.us!1794355200!1794441599.xml.gz"
+
+H4sIAL2Q9WoAA+1VQZKbMBA8J69w7QMQYJssVYo238iJksVgVAuSaiSc7O8zGFlg7x6Sqhz3ZNHT
+TM+02gV/+T0Ouwug19Z8fyqy/OlFfPnKO4D2JNUrnXc7juAshmaEIFsZ5BUk2OK5MXIE8VP21nKW
+nmMdRqkH0Y4SVQ+D+/E207RRmbIjZ0s1UqOCbkXxrT4cqvL4vM/KKq/2JWdrMbJpCGhQmvNNirAT
+nLW5vr0/Hss852xBEgFMbH4ojnVN+ib1Yw8Nk+TdxtzZQau3xk2nQfse1nEsrWJE6MGhDMFnk6eW
+Cxgpsn3Vo0DOlsMN9a67gvNvxJww1gBnLgEqiGLeZz4s0304CHmoLKah0P5ad/d2QgWNdqKusiIv
+s6LO9uTBiieqspMhQc6WQ8KjJlzkMJFbbarMBmjvrNeBMhSn3yJb4rx8R/dOjNWHZUSyYKmsZmx2
+fdSlK0oLct2CCbrTFOP1zR5kC9h0aMeHq9lWbt3et+ByCn2D4KchbNo+zh3vmSKtpA9zpj3gRSvI
+DISHGCyLwgAqWBRlXhZFXjxLWvmGbXiLsnDS+zmP14fVlrsx+NayvwrknQLgCIgWP5DZBJO982Pm
+p8j9U/zo/5lVn/H7jN9/ih9n6wfrD9Qw2v/TBgAA
+
+--_----------=_179447826913822121787--
+
+
+From noreply@dmarc.yahoo.com Thu Nov 12 10:11:09 2026
+X-Spam-Checker-Version: SpamAssassin 4.0.1 (2024-03-25) on
+	mymail-0.mymail-headless.default.svc.cluster.local
+X-Spam-Level: *
+X-Spam-Status: No, score=1.0 required=5.0 tests=DKIM_SIGNED,DKIM_VALID,
+	FORGED_YAHOO_RCVD,NO_RELAYS,URIBL_DBL_BLOCKED_OPENDNS autolearn=no
+	autolearn_force=no version=4.0.1
+DKIM-Signature: v=1; a=rsa-sha256; c=relaxed/relaxed; d=yahoo.com; s=s2048;
+ t=1794478269; bh=946RxPWVLfNjCnn+j+xYH66xhL4pfTRIh89yMWafGlg=;
+ h=Date:From:To:Subject:From:Subject:Reply-To;
+ b=uYRtmOMCEdr2FgY0aySBNJZReTw2oGTr1Pk/iFKfMaAqPyzuy959F6wGromFBBZJcR2fQL/D/WUTqnQFP77iBE2ZmY5pWAcJtgTOydwCk6/zC2h5YGMzrKj4WuymtYX3+muIwJJL19eTLDi+abhRg0I+79I8sCs9EDpsm2TZpFkcZ/1wJFGwKlRUuTvrWa02dvPd52a3uX4v3NZt+Ea5Fz8OmdJFmTRRnYQRhVsZiifpGyN1/jL9xoaiHUzs+QlKKRayuok2oireVjeqP/OCM6JHwVMrb+LRx2V/l+huTlSqdmAWaV4cbhh9RhPP0TeAFGW+JCrEtqlplCrb/1d3ig==
+X-SONIC-DKIM-SIGN: v=1; a=rsa-sha256; c=relaxed/relaxed; d=yahoo.com;
+ s=s2048; t=1794478269; bh=onT4YTjZlL9ccLWeezJVZEG54jj4uRdhy2DzYvLjrWV=;
+ h=X-Sonic-MF:Date:From:To:Subject:From:Subject;
+ b=CNtlCYKiCCyUZYa6UwKO9kBI8yLP9ItMqW1mvkP/eB6Vx3W96t1QwhY5IEzW2LdRyJJECNKkuos+qLyCs+6Z5UuG4PXoaXqdtbekJ0ihK+g6dX8oXJYK+1J+rzK7W7Ee/h/yJawuJ5b7KKtZeatxeB3lq8pMDZrEL4fR5u3ETmx1GjYb5luJNyMnF3gUcUaSzbbJPIhluqV9c9hQGZh54vZ+uVUhqcfkdfBDDMPfUhZ54dEOHi5F/s+O9fgAXn1PrT12kJCGS12W30Ag5e8BiDEKpG+LdeBakJqJetRELC1YXpv2H+8OEBGFNoVpTMw+CQ2pNuFqB9b5m0JWp67PCw==
+X-Sonic-MF: noreply@dmarc.yahoo.com
+X-Sonic-ID: 4d232ae1-183b-48b9-a4b6-d5858392f0ec
+Received: from sonic.gate.mail.ne1.yahoo.com by
+ mail-asdoutdeli-p-cin-usea5-prod-sonicconsumer-svc-102 with HTTP; Thu, 12
+ Nov 2026 10:11:09 +0000
+Content-Transfer-Encoding: binary
+Content-Type: multipart/mixed; boundary="_----------=_179447826913822121786"
+MIME-Version: 1.0
+X-Mailer: MIME::Lite 3.033 (F2.85; T2.18; B3.16; Q3.16)
+Date: Thu, 12 Nov 2026 10:11:09 +0000
+From: noreply@dmarc.yahoo.com
+To: ken@thepratts.us
+Subject: Report Domain: thepratts.us Submitter: aol.com Report-ID:
+ <1794462583.260605>
+Message-Id: <1794478269.268262@dmarc.yahoo.com>
+X-Evolution-Source: vfolder
+
+This is a multi-part message in MIME format.
+
+--_----------=_179447826913822121786
+Content-Disposition: inline
+Content-Type: text/plain
+Content-Transfer-Encoding: 8bit
+
+This is an aggregate DMARC report from Yahoo for your domain "thepratts.us".
+
+This domain has a DMARC record set up. You are receiving this report because your email address is included in the 'rua' tag which is part of that DMARC record. DMARC is set up in the DNS settings of your domain.
+
+If you have questions about DMARC, please refer to the DMARC.org website, or contact your email service or hosting provider.
+
+If you no longer wish to receive these reports, or if you would like them to be sent to a different location, please update the 'rua' tag of the DMARC record of your domain. To do this please contact your email, domain or hosting provider. Please do not contact us as we will not be able to help you with updates to the DNS settings of your domain.
+
+Please note that this email address is not monitored, and you will not receive a response if you reply to this email. For any feedback or questions, please reach out to dmarchelp@yahooinc.com.
+--_----------=_179447826913822121786
+Content-Disposition: attachment; filename="aol.com!thepratts.us!1794355200!1794441599.xml.gz"
+Content-Transfer-Encoding: base64
+Content-Type: application/gzip; name="aol.com!thepratts.us!1794355200!1794441599.xml.gz"
+
+H4sIAL2Q9WoAA41UQXKjMBA8777ClQcgILY3rtIq+409UbIYjCogqUbCSX6/gyULTHLYE6KnmZ5u
+TcFfP8ZhdwX02prfT1VRPr2KHz95B9CepXqj827HEZzF0IwQZCuDvIEEW7w0Ro4g/sreWs7ye6rD
+KPUg2lGi6mFwfz5nmjaqUHbkLFYTNSnoVlS/Tvv9sT68PBf1sTyWB86WYmLTENCgNJe7FGFnuGhz
++/r5cKjLkrOIZAKY1HxfHU4n0je5H9s0zJIPjrmzg1afjZvOg/Y9LONYsmJE6MGhDMEXk6eWEUwU
+2b7pUSBn8XBHvetu4PxMmBPGGuDMZUAFUc1+5kOc7ttBKENlMQ+F9n3x7u2EChrtxOlYVGVdUED0
+5GwpZK6ykyFFzuIh40kUrnKYKK42V+YEtHfW60BLlMZfI2vi7L6jiyfGEkSckTKIlSWNldmtLt1R
+dsh1CyboTtMeL1/2IFvApkM7bu5mXbl3+9qCyyn0DYKfhrBqu507XTTttJI+zEvtAa9aQWEgbPYg
+GoUBVLAo6rKuqrJ6kWT5jq14UVk46f28kLeXJZaHMfg6sv/ayAcFwBEQLX4js9pM9iWPmZ92jrPl
+l/EPdUnzlFUEAAA=
+
+--_----------=_179447826913822121786--
+
+

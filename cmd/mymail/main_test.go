@@ -129,16 +129,23 @@ func TestLogCleartextPasswordWarnings(t *testing.T) {
 
 func TestRegisterConfiguredPlugins(t *testing.T) {
 	processors := plugins.New()
-	if err := registerConfiguredPlugins(processors, []config.PluginConfig{{Name: "spamd"}}); err != nil {
+	if err := registerConfiguredPlugins(processors, []config.PluginConfig{{Name: "spamd"}, {Name: "dmarc"}}, nil); err != nil {
 		t.Fatal(err)
 	}
 
 	failures := processors.Initialize(context.Background(), []config.PluginConfig{{
 		Name:   "spamd",
 		Config: map[string]string{"timeout": "invalid"},
+	}, {
+		Name:   "dmarc",
+		Config: map[string]string{"max_report_size": "0"},
 	}})
-	if len(failures) != 1 || failures[0].Processor.Name() != "spamd" {
-		t.Fatalf("initialization failures = %#v, want one spamd failure", failures)
+	failedNames := make(map[string]bool, len(failures))
+	for _, failure := range failures {
+		failedNames[failure.Processor.Name()] = true
+	}
+	if len(failures) != 2 || !failedNames["spamd"] || !failedNames["dmarc"] {
+		t.Fatalf("initialization failures = %#v, want spamd and dmarc failures", failures)
 	}
 }
 
