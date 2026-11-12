@@ -521,7 +521,7 @@ func dmarcCharsetReader(charset string, input io.Reader) (io.Reader, error) {
 var dmarcHTMLTemplate = template.Must(template.New("dmarc-report").Parse(`<!doctype html>
 <html><head><meta charset="utf-8"><title>DMARC report {{.Metadata.ReportID}}</title>
 <style>body{font-family:sans-serif;color:#222}table{border-collapse:collapse;width:100%;margin:1em 0}th,td{border:1px solid #bbb;padding:.4em;text-align:left;vertical-align:top}th{background:#eee}.pass{background:#e5f5e5}.fail{background:#fde8e8}h1,h2{margin-bottom:.3em}</style></head>
-<body><h1>DMARC aggregate report</h1><table><tbody>
+<body><h1>DMARC aggregate report (produced by mymail plugin)</h1><table><tbody>
 <tr><th>Organization</th><td>{{.Metadata.OrgName}}</td><th>Contact</th><td>{{.Metadata.Email}}</td></tr>
 <tr><th>Extra contact</th><td>{{.Metadata.ExtraContactInfo}}</td><th>Report ID</th><td>{{.Metadata.ReportID}}</td></tr>
 <tr><th>Period (UTC)</th><td>{{.BeginUTC}} – {{.EndUTC}}</td><th>Domain</th><td>{{.Policy.Domain}}</td></tr>
