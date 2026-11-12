@@ -252,7 +252,7 @@ func (p *DMARCReportProcessor) Process(ctx context.Context, message *Message) (R
 			"messages", attachment.report.Totals.Messages,
 			"filename", attachment.name)
 	}
-	return Result{Decision: Accept}, nil
+	return Result{Decision: Accept, StopChain: true}, nil
 }
 
 func (p *DMARCReportProcessor) warnCandidate(filename string, err error) {

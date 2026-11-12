@@ -43,8 +43,8 @@ func TestDMARCProcessorSummarizesSampleReports(t *testing.T) {
 			message := &Message{Data: append([]byte(nil), original...)}
 			originalPartCount := countTestMIMEParts(t, original)
 			result, err := processor.Process(context.Background(), message)
-			if err != nil || result.Decision != Accept {
-				t.Fatalf("Process() = (%+v, %v), want Accept and nil", result, err)
+			if err != nil || result.Decision != Accept || !result.StopChain {
+				t.Fatalf("Process() = (%+v, %v), want accepted StopChain and nil", result, err)
 			}
 			if !bytes.Contains(message.Data, []byte(dmarcReportMarkerHeader+": summarized")) {
 				t.Fatal("processed message lacks DMARC marker header")
@@ -125,8 +125,8 @@ func TestDMARCProcessorLeavesUnrelatedOrInvalidMessagesUnchanged(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			message := &Message{Data: append([]byte(nil), test.message...)}
 			result, err := processor.Process(context.Background(), message)
-			if err != nil || result.Decision != Accept {
-				t.Fatalf("Process() = (%+v, %v), want Accept and nil", result, err)
+			if err != nil || result.Decision != Accept || result.StopChain {
+				t.Fatalf("Process() = (%+v, %v), want Accept without StopChain and nil", result, err)
 			}
 			if !bytes.Equal(message.Data, test.message) {
 				t.Fatal("message changed despite there being no valid DMARC report")
@@ -183,8 +183,12 @@ func TestDMARCProcessorSkipsMarkedMessages(t *testing.T) {
 	original = bytes.Replace(original, []byte("\r\n\r\n"), []byte("\r\n"+dmarcReportMarkerHeader+": already\r\n\r\n"), 1)
 	message := &Message{Data: append([]byte(nil), original...)}
 	processor := NewDMARCReportProcessor(nil)
-	if _, err := processor.Process(context.Background(), message); err != nil {
+	result, err := processor.Process(context.Background(), message)
+	if err != nil {
 		t.Fatal(err)
+	}
+	if result.StopChain {
+		t.Fatal("already-marked message requested that the chain stop")
 	}
 	if !bytes.Equal(message.Data, original) {
 		t.Fatal("marked message was changed")

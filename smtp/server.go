@@ -242,11 +242,12 @@ func MessageID(data []byte) string {
 }
 
 type transaction struct {
-	started    bool
-	from       string
-	recipients []string
-	mailboxes  []string
-	forward    []string
+	started         bool
+	from            string
+	recipients      []string
+	mailboxes       []string
+	localRecipients []string
+	forward         []string
 }
 
 func (s *Server) pluginMessage(tx transaction, data []byte, remoteAddr string) *plugins.Message {
@@ -254,14 +255,19 @@ func (s *Server) pluginMessage(tx transaction, data []byte, remoteAddr string) *
 	if len(tx.mailboxes) > 0 {
 		mailbox = tx.mailboxes[0]
 	}
-	return s.pluginMessageForMailbox(tx, data, remoteAddr, mailbox)
+	recipient := ""
+	if len(tx.localRecipients) == len(tx.mailboxes) && len(tx.localRecipients) > 0 {
+		recipient = tx.localRecipients[0]
+	}
+	return s.pluginMessageForMailbox(tx, data, remoteAddr, mailbox, recipient)
 }
 
-func (s *Server) pluginMessageForMailbox(tx transaction, data []byte, remoteAddr, mailbox string) *plugins.Message {
+func (s *Server) pluginMessageForMailbox(tx transaction, data []byte, remoteAddr, mailbox, recipient string) *plugins.Message {
 	message := &plugins.Message{
 		Data:       append([]byte(nil), data...),
 		From:       tx.from,
 		Recipients: append([]string(nil), tx.recipients...),
+		Recipient:  recipient,
 		Metadata:   map[string]string{"peer": remoteAddr},
 		Mailbox:    mailbox,
 	}
@@ -280,8 +286,12 @@ type localDelivery struct {
 
 func (s *Server) processLocalRecipients(ctx context.Context, tx transaction, data []byte, remoteAddr string) ([]localDelivery, plugins.Result) {
 	deliveries := make([]localDelivery, 0, len(tx.mailboxes))
-	for _, mailbox := range tx.mailboxes {
-		message := s.pluginMessageForMailbox(tx, data, remoteAddr, mailbox)
+	for index, mailbox := range tx.mailboxes {
+		recipient := ""
+		if len(tx.localRecipients) == len(tx.mailboxes) {
+			recipient = tx.localRecipients[index]
+		}
+		message := s.pluginMessageForMailbox(tx, data, remoteAddr, mailbox, recipient)
 		result := plugins.Result{Decision: plugins.Accept}
 		if s.Processors != nil {
 			result = s.Processors.Process(ctx, message)
@@ -445,6 +455,7 @@ func (s *Server) handle(ctx context.Context, conn net.Conn) {
 					logger.Info("SMTP recipient accepted", "remote_addr", remoteAddr, "recipient", address, "route", "split-forward", "mailbox", mailbox)
 				} else {
 					tx.mailboxes = append(tx.mailboxes, mailbox)
+					tx.localRecipients = append(tx.localRecipients, address)
 					logger.Info("SMTP recipient accepted", "remote_addr", remoteAddr, "recipient", address, "route", "local", "mailbox", mailbox)
 				}
 			} else if domain, ok := recipientDomain(address); ok && s.LocalDomain != nil && !s.LocalDomain(domain) {
@@ -610,10 +621,11 @@ func (s *Server) DeliverLocal(ctx context.Context, from, recipient string, data 
 		return fmt.Errorf("unknown local mailbox %s", recipient)
 	}
 	tx := transaction{
-		started:    true,
-		from:       from,
-		recipients: []string{recipient},
-		mailboxes:  []string{mailbox},
+		started:         true,
+		from:            from,
+		recipients:      []string{recipient},
+		mailboxes:       []string{mailbox},
+		localRecipients: []string{recipient},
 	}
 	deliveries, result := s.processLocalRecipients(ctx, tx, data, "split")
 	switch result.Decision {

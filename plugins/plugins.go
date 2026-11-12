@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 	"sync"
 )
 
@@ -47,6 +48,8 @@ type Message struct {
 	From string
 	// Recipients contains the SMTP envelope recipients.
 	Recipients []string
+	// Recipient is the local envelope recipient for this mailbox delivery.
+	Recipient string
 	// Metadata contains connection and application context.
 	Metadata map[string]string
 	// Mailbox is the canonical name of the local mailbox being processed. It
@@ -67,6 +70,8 @@ type Result struct {
 	Reason string
 	// Folder overrides Message.Folder when non-empty.
 	Folder string
+	// StopChain prevents later processors from examining this accepted message.
+	StopChain bool
 	// Err reports a processor error that was tolerated. When set, Decision is
 	// Accept and the original message is restored for delivery.
 	Err error
@@ -90,6 +95,8 @@ type PluginConfig struct {
 	Name string `yaml:"name"`
 	// Config contains string settings passed to the processor at initialization.
 	Config map[string]string `yaml:"config,omitempty"`
+	// Whitelist restricts processing to these envelope recipient addresses.
+	Whitelist []string `yaml:"whitelist,omitempty"`
 }
 
 // InitializationFailure identifies a processor that could not initialize.
@@ -102,8 +109,13 @@ type InitializationFailure struct {
 // processing after registration is complete.
 type Chain struct {
 	mu         sync.RWMutex
-	processors []Processor
+	processors []configuredProcessor
 	logger     *slog.Logger
+}
+
+type configuredProcessor struct {
+	processor Processor
+	whitelist map[string]struct{}
 }
 
 // New creates an empty processor chain.
@@ -127,7 +139,7 @@ func (c *Chain) Add(processor Processor) error {
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.processors = append(c.processors, processor)
+	c.processors = append(c.processors, configuredProcessor{processor: processor})
 	return nil
 }
 
@@ -138,9 +150,10 @@ func (c *Chain) Initialize(ctx context.Context, configured ...[]PluginConfig) []
 	logger := c.currentLogger()
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	active := make([]Processor, 0, len(c.processors))
+	active := make([]configuredProcessor, 0, len(c.processors))
 	var failures []InitializationFailure
-	for _, processor := range c.processors {
+	for _, entry := range c.processors {
+		processor := entry.processor
 		name := processor.Name()
 		logger.Info("plugin initialization started", "plugin", name)
 		if err := initializeOne(ctx, processor, pluginSettings(name, configured)); err != nil {
@@ -148,8 +161,9 @@ func (c *Chain) Initialize(ctx context.Context, configured ...[]PluginConfig) []
 			failures = append(failures, InitializationFailure{Processor: processor, Err: err})
 			continue
 		}
-		logger.Info("plugin initialized", "plugin", name)
-		active = append(active, processor)
+		whitelist := pluginWhitelist(name, configured)
+		logger.Info("plugin initialized", "plugin", name, "whitelist_count", len(whitelist))
+		active = append(active, configuredProcessor{processor: processor, whitelist: whitelist})
 	}
 	c.processors = active
 	return failures
@@ -160,7 +174,7 @@ func (c *Chain) Initialize(ctx context.Context, configured ...[]PluginConfig) []
 // stops the chain.
 func (c *Chain) Process(ctx context.Context, message *Message) Result {
 	c.mu.RLock()
-	processors := append([]Processor(nil), c.processors...)
+	processors := append([]configuredProcessor(nil), c.processors...)
 	logger := c.logger
 	c.mu.RUnlock()
 	if logger == nil {
@@ -172,8 +186,13 @@ func (c *Chain) Process(ctx context.Context, message *Message) Result {
 		originalData = append([]byte(nil), message.Data...)
 		originalFolder = message.Folder
 	}
-	for _, processor := range processors {
+	for index, configuredProcessor := range processors {
+		processor := configuredProcessor.processor
 		name := processor.Name()
+		if !matchesWhitelist(configuredProcessor.whitelist, message) {
+			logger.Info("plugin processing skipped", "plugin", name, "reason", "recipient not in whitelist")
+			continue
+		}
 		logger.Info("plugin processing started", "plugin", name, "bytes", lenMessageData(message))
 		result, err := processOne(ctx, processor, message)
 		if err != nil {
@@ -189,7 +208,15 @@ func (c *Chain) Process(ctx context.Context, message *Message) Result {
 		}
 		switch result.Decision {
 		case Accept:
-			logger.Info("plugin processing completed", "plugin", name, "decision", result.Decision)
+			logger.Info("plugin processing completed", "plugin", name, "decision", result.Decision, "stop_chain", result.StopChain)
+			if result.StopChain {
+				skipped := make([]string, 0, len(processors)-index-1)
+				for _, remaining := range processors[index+1:] {
+					skipped = append(skipped, remaining.processor.Name())
+				}
+				logger.Info("plugin chain stopped", "plugin", name, "stop_chain", true, "skipped_plugins", skipped)
+				return Result{Decision: Accept, StopChain: true}
+			}
 			continue
 		case Reject, TemporaryFailure, Discard:
 			if result.Reason == "" {
@@ -203,6 +230,44 @@ func (c *Chain) Process(ctx context.Context, message *Message) Result {
 		}
 	}
 	return Result{Decision: Accept}
+}
+
+func pluginWhitelist(name string, configured [][]PluginConfig) map[string]struct{} {
+	if len(configured) == 0 {
+		return nil
+	}
+	for _, plugin := range configured[0] {
+		if plugin.Name != name || len(plugin.Whitelist) == 0 {
+			continue
+		}
+		whitelist := make(map[string]struct{}, len(plugin.Whitelist))
+		for _, address := range plugin.Whitelist {
+			if address = strings.TrimSpace(address); address != "" {
+				whitelist[strings.ToLower(address)] = struct{}{}
+			}
+		}
+		return whitelist
+	}
+	return nil
+}
+
+func matchesWhitelist(whitelist map[string]struct{}, message *Message) bool {
+	if len(whitelist) == 0 {
+		return true
+	}
+	if message == nil {
+		return false
+	}
+	if message.Recipient != "" {
+		_, ok := whitelist[strings.ToLower(strings.TrimSpace(message.Recipient))]
+		return ok
+	}
+	for _, recipient := range message.Recipients {
+		if _, ok := whitelist[strings.ToLower(strings.TrimSpace(recipient))]; ok {
+			return true
+		}
+	}
+	return false
 }
 
 func (c *Chain) currentLogger() *slog.Logger {

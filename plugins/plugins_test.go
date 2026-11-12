@@ -69,6 +69,78 @@ func TestChainStopsAtDecision(t *testing.T) {
 	}
 }
 
+func TestChainWhitelistFiltersRecipients(t *testing.T) {
+	processor := &testProcessor{name: "dmarc", result: Result{Decision: Accept}}
+	chain := New()
+	if err := chain.Add(processor); err != nil {
+		t.Fatal(err)
+	}
+	configured := []PluginConfig{{Name: "dmarc", Whitelist: []string{"ken@thepratts.us"}}}
+	if failures := chain.Initialize(context.Background(), configured); len(failures) != 0 {
+		t.Fatalf("initialization failures = %#v", failures)
+	}
+
+	chain.Process(context.Background(), &Message{Recipient: "other@thepratts.us", Recipients: []string{"ken@thepratts.us"}})
+	if processor.calls != 0 {
+		t.Fatalf("processor ran for a non-whitelisted mailbox recipient; calls = %d", processor.calls)
+	}
+	chain.Process(context.Background(), &Message{Recipient: "KEN@THEPRATTS.US"})
+	if processor.calls != 1 {
+		t.Fatalf("processor calls after case-insensitive recipient match = %d, want 1", processor.calls)
+	}
+	chain.Process(context.Background(), &Message{Recipients: []string{"other@thepratts.us", "Ken@ThePratts.us"}})
+	if processor.calls != 2 {
+		t.Fatalf("processor calls after Recipients fallback = %d, want 2", processor.calls)
+	}
+}
+
+func TestChainWithoutWhitelistRunsForAllRecipients(t *testing.T) {
+	processor := &testProcessor{name: "spamd", result: Result{Decision: Accept}}
+	chain := New()
+	if err := chain.Add(processor); err != nil {
+		t.Fatal(err)
+	}
+	if failures := chain.Initialize(context.Background(), []PluginConfig{{Name: "spamd"}}); len(failures) != 0 {
+		t.Fatalf("initialization failures = %#v", failures)
+	}
+	for _, recipient := range []string{"alice@example.test", "bob@example.test"} {
+		chain.Process(context.Background(), &Message{Recipient: recipient})
+	}
+	if processor.calls != 2 {
+		t.Fatalf("processor calls = %d, want 2", processor.calls)
+	}
+}
+
+func TestChainStopChainKeepsChangesAndSkipsRemainingProcessors(t *testing.T) {
+	first := &testProcessor{
+		name:   "dmarc",
+		result: Result{Decision: Accept, StopChain: true, Folder: "Reports"},
+		mutate: func(message *Message) { message.Data = []byte("augmented") },
+	}
+	second := &testProcessor{name: "spamd", result: Result{Decision: Accept}}
+	chain := New()
+	if err := chain.Add(first); err != nil {
+		t.Fatal(err)
+	}
+	if err := chain.Add(second); err != nil {
+		t.Fatal(err)
+	}
+	if failures := chain.Initialize(context.Background()); len(failures) != 0 {
+		t.Fatalf("initialization failures = %#v", failures)
+	}
+	message := &Message{Data: []byte("original")}
+	result := chain.Process(context.Background(), message)
+	if result.Decision != Accept || !result.StopChain {
+		t.Fatalf("Process() result = %#v, want accepted StopChain", result)
+	}
+	if string(message.Data) != "augmented" || message.Folder != "Reports" {
+		t.Fatalf("message after stop-chain processing = %#v, want augmented data and Reports folder", message)
+	}
+	if first.calls != 1 || second.calls != 0 {
+		t.Fatalf("processor calls: first=%d second=%d, want 1 and 0", first.calls, second.calls)
+	}
+}
+
 func TestChainSupportsConcurrentProcessing(t *testing.T) {
 	processor := &testProcessor{name: "accept", result: Result{Decision: Accept}}
 	chain := New()

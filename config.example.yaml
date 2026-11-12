@@ -66,10 +66,16 @@ hostname: mail.example.test
 #    (e.g., spam-user-4821@mail.example.test, ham-barb@example.test).
 #  - Forwarded emails in training messages are submitted to spamd for learning,
 #    and a detailed training report is delivered to the user's inbox.
-#  - DMARC aggregate reports can be summarized as an additional HTML attachment.
-#    Put dmarc after spamd: adding the attachment changes the body and invalidates
-#    the sender's DKIM body hash for any later verifier.
+#  - Put dmarc before spamd and whitelist only the recipients that should receive
+#    summarized reports. A recognized report stops the chain before spamd;
+#    ordinary or invalid messages continue to spamd.
 # plugins:
+#   - name: dmarc
+#     whitelist:
+#       - ken@thepratts.us
+#     config:
+#       max_report_size: 10485760
+#       max_message_size: 26214400
 #   - name: spamd
 #     config:
 #       address: 127.0.0.1:783
@@ -77,10 +83,6 @@ hostname: mail.example.test
 #       # the resolved mailbox name in the SPAMC User header for each delivery.
 #       timeout: 30s
 #       max_message_size: 10485760
-#   - name: dmarc
-#     config:
-#       max_report_size: 10485760
-#       max_message_size: 26214400
 # Authenticated sessions may forward recipients at other domains to their MX host.
 # Note: Any configured user address or alias automatically supports 'spam-' and
 # 'ham-' prefixes for spam/ham training without requiring additional alias entries.

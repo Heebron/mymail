@@ -768,6 +768,8 @@ func TestValidateRejectsInvalidPlugins(t *testing.T) {
 	}{
 		{name: "empty name", plugins: []PluginConfig{{Config: map[string]string{"key": "value"}}}},
 		{name: "duplicate name", plugins: []PluginConfig{{Name: "same"}, {Name: "same"}}},
+		{name: "malformed whitelist", plugins: []PluginConfig{{Name: "test", Whitelist: []string{"alice"}}}},
+		{name: "unknown whitelist address", plugins: []PluginConfig{{Name: "test", Whitelist: []string{"unknown@example.test"}}}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			config := base
@@ -776,6 +778,29 @@ func TestValidateRejectsInvalidPlugins(t *testing.T) {
 				t.Fatal("Validate() accepted invalid plugins")
 			}
 		})
+	}
+}
+
+func TestValidateAcceptsPluginWhitelistUserAndAlias(t *testing.T) {
+	config := Config{
+		SMTPListen:  "127.0.0.1:2525",
+		IMAPListen:  "127.0.0.1:1143",
+		TLSCertFile: "/etc/mymail/tls.crt",
+		TLSKeyFile:  "/etc/mymail/tls.key",
+		MaildirRoot: t.TempDir(),
+		Hostname:    "mail.example.test",
+		Plugins: []PluginConfig{{Name: "dmarc", Whitelist: []string{
+			" alice@example.test ", "alias@example.test",
+		}}},
+		Users: map[string]User{
+			"alice@example.test": {Password: "secret", Aliases: []string{"alias@example.test"}},
+		},
+	}
+	if err := config.Validate(); err != nil {
+		t.Fatalf("Validate() rejected valid plugin whitelist: %v", err)
+	}
+	if got := config.Plugins[0].Whitelist[0]; got != "alice@example.test" {
+		t.Fatalf("trimmed whitelist address = %q, want alice@example.test", got)
 	}
 }
 
@@ -846,6 +871,7 @@ func TestLoadYAMLEnvironmentExpansion(t *testing.T) {
 	t.Setenv("MYMAIL_ALIAS", "alias-from-environment@example.test")
 	t.Setenv("MYMAIL_PLUGIN_ENDPOINT", "https://expanded.example.test")
 	t.Setenv("MYMAIL_PLUGIN_TOKEN", "expanded-token")
+	t.Setenv("MYMAIL_PLUGIN_WHITELIST", "alias-from-environment@example.test")
 	path := filepath.Join(t.TempDir(), "config.yaml")
 	contents := []byte(`smtp_listen: ${MYMAIL_SMTP_LISTEN}
 smtp_cleartext_listen: ${MYMAIL_SMTP_CLEARTEXT_LISTEN}
@@ -858,6 +884,8 @@ maildir_root: ${MYMAIL_ROOT}/mymail
 hostname: ${MYMAIL_HOSTNAME}
 plugins:
   - name: test-plugin
+    whitelist:
+      - ${MYMAIL_PLUGIN_WHITELIST}
     config:
       endpoint: ${MYMAIL_PLUGIN_ENDPOINT}
       token: ${MYMAIL_PLUGIN_TOKEN}
@@ -893,6 +921,9 @@ users:
 	pluginSettings := got.Plugins[0].Config
 	if pluginSettings["endpoint"] != "https://expanded.example.test" || pluginSettings["token"] != "expanded-token" {
 		t.Fatalf("expanded plugin settings = %#v", pluginSettings)
+	}
+	if len(got.Plugins[0].Whitelist) != 1 || got.Plugins[0].Whitelist[0] != "alias-from-environment@example.test" {
+		t.Fatalf("expanded plugin whitelist = %#v", got.Plugins[0].Whitelist)
 	}
 	if !got.Authenticate("alice@example.test", "secret-from-environment") {
 		t.Fatal("Authenticate() rejected expanded password")

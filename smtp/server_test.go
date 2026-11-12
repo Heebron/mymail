@@ -39,7 +39,8 @@ type countingProcessor struct {
 }
 
 type mailboxProcessor struct {
-	mailboxes []string
+	mailboxes  []string
+	recipients []string
 }
 
 type failingProcessor struct {
@@ -413,6 +414,7 @@ func (p *mailboxProcessor) Initialize(context.Context, map[string]string) error 
 
 func (p *mailboxProcessor) Process(_ context.Context, message *plugins.Message) (plugins.Result, error) {
 	p.mailboxes = append(p.mailboxes, message.Mailbox)
+	p.recipients = append(p.recipients, message.Recipient)
 	message.Data = []byte("X-Mailbox: " + message.Mailbox + "\r\n\r\nbody")
 	return plugins.Result{Decision: plugins.Accept}, nil
 }
@@ -462,9 +464,10 @@ func TestSMTPProcessesEachLocalMailboxSeparately(t *testing.T) {
 	}
 	server := &Server{Store: store, Processors: processors}
 	tx := transaction{
-		from:       "sender@example.test",
-		recipients: []string{"alice@example.test", "bob@example.test"},
-		mailboxes:  []string{"alice", "bob"},
+		from:            "sender@example.test",
+		recipients:      []string{"alice@example.test", "bob@example.test"},
+		mailboxes:       []string{"alice", "bob"},
+		localRecipients: []string{"alice@example.test", "bob@example.test"},
 	}
 	data := []byte("Subject: original\r\n\r\nbody")
 	deliveries, result := server.processLocalRecipients(context.Background(), tx, data, "192.0.2.1:25")
@@ -473,6 +476,9 @@ func TestSMTPProcessesEachLocalMailboxSeparately(t *testing.T) {
 	}
 	if got, want := strings.Join(processor.mailboxes, ","), "alice,bob"; got != want {
 		t.Fatalf("processed mailboxes = %q, want %q", got, want)
+	}
+	if got, want := strings.Join(processor.recipients, ","), "alice@example.test,bob@example.test"; got != want {
+		t.Fatalf("processed recipients = %q, want %q", got, want)
 	}
 	if len(deliveries) != 2 {
 		t.Fatalf("deliveries = %d, want 2", len(deliveries))
@@ -499,6 +505,42 @@ func TestSMTPProcessesEachLocalMailboxSeparately(t *testing.T) {
 		if !bytes.Equal(got, want) {
 			t.Fatalf("%s message = %q, want %q", mailbox, got, want)
 		}
+	}
+}
+
+func TestSMTPPluginWhitelistUsesEachLocalEnvelopeRecipient(t *testing.T) {
+	store, err := maildir.New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	processor := &mailboxProcessor{}
+	processors := plugins.New()
+	if err := processors.Add(processor); err != nil {
+		t.Fatal(err)
+	}
+	configured := []plugins.PluginConfig{{Name: "mailbox", Whitelist: []string{"alice@example.test"}}}
+	if failures := processors.Initialize(context.Background(), configured); len(failures) != 0 {
+		t.Fatalf("initialization failures = %#v", failures)
+	}
+	server := &Server{Store: store, Processors: processors}
+	tx := transaction{
+		from:            "sender@example.test",
+		recipients:      []string{"alice@example.test", "bob@example.test"},
+		mailboxes:       []string{"alice", "bob"},
+		localRecipients: []string{"alice@example.test", "bob@example.test"},
+	}
+	deliveries, result := server.processLocalRecipients(context.Background(), tx, []byte("Subject: original\r\n\r\nbody"), "192.0.2.1:25")
+	if result.Decision != plugins.Accept || len(deliveries) != 2 {
+		t.Fatalf("processing result = %#v, deliveries = %d; want accept and both deliveries", result, len(deliveries))
+	}
+	if got := strings.Join(processor.mailboxes, ","); got != "alice" {
+		t.Fatalf("whitelisted plugin ran for mailboxes %q, want alice only", got)
+	}
+	if got := strings.Join(processor.recipients, ","); got != "alice@example.test" {
+		t.Fatalf("whitelisted plugin saw recipients %q, want alice@example.test", got)
+	}
+	if !bytes.Equal(deliveries[1].message.Data, []byte("Subject: original\r\n\r\nbody")) {
+		t.Fatal("non-whitelisted mailbox message was unexpectedly processed")
 	}
 }
 

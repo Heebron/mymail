@@ -363,28 +363,43 @@ maildir_root: ${HOME}/mymail
 Placeholders for variables that are not defined are left unchanged.
 
 Plugins may be configured as an ordered list of objects. Each object contains
-a plugin `name` and an optional string key/value `config` map passed to that
-plugin's `Initialize` method:
+a plugin `name`, an optional `whitelist` of recipient addresses, and an optional
+string key/value `config` map passed to that plugin's `Initialize` method:
 
 ```yaml
 plugins:
   - name: example-plugin
+    whitelist:
+      - ken@example.test
     config:
       endpoint: ${EXAMPLE_PLUGIN_ENDPOINT}
       token: ${EXAMPLE_PLUGIN_TOKEN}
 ```
 
 Plugin setting values support the same environment expansion as other
-configuration values.
+configuration values. Whitelist addresses also support environment expansion.
+An omitted or empty whitelist means the plugin runs for every recipient. A
+non-empty whitelist is matched case-insensitively against the current local
+envelope recipient; list aliases separately if the plugin should run for them.
+For messages constructed without a per-mailbox recipient, the whitelist matches
+if any address in `Recipients` is listed.
 
 MyMail includes the `spamd` plugin for SpamAssassin filtering and training, and
 the `dmarc` plugin for DMARC aggregate reports. The latter recognizes gzip,
 ZIP, and plain XML reports and adds a human-readable HTML attachment while
-leaving the original report intact. Configure `dmarc` after `spamd`, because
-adding the attachment changes the message body and invalidates the sender's
-DKIM body hash for any subsequent verifier. `max_report_size` and
-`max_message_size` optionally set positive byte limits (defaults: 10 MiB and
-25 MiB).
+leaving the original report intact. Configure `dmarc` before `spamd` and set a
+whitelist for the report recipients: a recognized report is augmented and
+stops further plugin processing, while unrelated or invalid messages continue
+to spamd. This avoids changing the message before SpamAssassin sees ordinary
+mail; the added report attachment does invalidate the sender's DKIM body hash.
+`max_report_size` and `max_message_size` optionally set positive byte limits
+(defaults: 10 MiB and 25 MiB).
+
+Plugins run in registration order for each local mailbox delivery. A plugin
+may return `StopChain` with an accepted result to preserve its message changes
+and skip remaining plugins for that mailbox; rejected, temporary-failure, and
+discard decisions already stop processing. Plugin messages expose both the
+full envelope `Recipients` list and the current mailbox's `Recipient` address.
 
 `smtp_listen` always requires `STARTTLS` before authentication or submission.
 `tls_cert_file` and `tls_key_file` are required for that listener and enable

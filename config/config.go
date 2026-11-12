@@ -216,6 +216,9 @@ func (c *Config) expandEnvironment() {
 		c.Users[username] = user
 	}
 	for index := range c.Plugins {
+		for whitelistIndex, address := range c.Plugins[index].Whitelist {
+			c.Plugins[index].Whitelist[whitelistIndex] = expandEnvironment(address)
+		}
 		for key, value := range c.Plugins[index].Config {
 			c.Plugins[index].Config[key] = expandEnvironment(value)
 		}
@@ -386,7 +389,26 @@ func (c *Config) Validate() error {
 			aliases[key] = username
 		}
 	}
+	for _, plugin := range c.Plugins {
+		for index, address := range plugin.Whitelist {
+			address = strings.TrimSpace(address)
+			if !isPluginWhitelistAddress(address) {
+				return fmt.Errorf("plugin %q whitelist[%d] must be an email address in local@domain form", plugin.Name, index)
+			}
+			plugin.Whitelist[index] = address
+			if len(c.Users) > 0 {
+				if _, ok := c.Resolve(address); !ok {
+					return fmt.Errorf("plugin %q whitelist address %q is not a configured user, alias, or spam-/ham- address", plugin.Name, address)
+				}
+			}
+		}
+	}
 	return nil
+}
+
+func isPluginWhitelistAddress(address string) bool {
+	local, domain, ok := strings.Cut(address, "@")
+	return ok && local != "" && domain != "" && !strings.Contains(domain, "@") && !strings.ContainsAny(address, " \t\r\n<>")
 }
 
 func validateRemoteHostname(hostname string) error {
