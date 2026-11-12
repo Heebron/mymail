@@ -28,4 +28,4 @@
 !smtp/
 !smtp/**
 !split/
-!split/**
+!split/**/plugins/dmarc-samples/

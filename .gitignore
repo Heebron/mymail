@@ -29,3 +29,4 @@ go.work.sum
 /mymail-send
 /mymail-password
 /mymail-dkim
+!/plugins/dmarc-samples/
